@@ -239,6 +239,20 @@ def save_cached_vehicles(vehicles: List[dict]):
         logger.warning(f"Failed to write cached vehicles: {exc}")
 
 
+def warm_vehicle_cache():
+    """Best-effort warmup for cold deployments so the first app open is less likely to see an empty payload."""
+    try:
+        payload = run_ninecli_json(["vehicles"], cold_start_retries=4, retry_delay_seconds=1.0)
+        vehicles = normalize_vehicle_list(payload)
+        if vehicles:
+            save_cached_vehicles(vehicles)
+            logger.info(f"Warmed vehicle cache with {len(vehicles)} vehicles")
+        else:
+            logger.warning("Vehicle cache warmup finished without valid vehicles")
+    except Exception as exc:
+        logger.warning(f"Vehicle cache warmup skipped: {exc}")
+
+
 def normalize_vehicle(v: dict) -> dict:
     """Normalize Ninebot vehicle object for consistent SN access."""
     sn = v.get("sn") or v.get("wnumber") or v.get("vin") or v.get("id") or ""
@@ -476,6 +490,7 @@ def startup_event():
         write_ninebot_tokens_to_disk(tokens_json)
     else:
         logger.info("No NINEBOT_TOKENS_JSON env var provided. Depending on existing ninecli tokens.json")
+    warm_vehicle_cache()
 
 
 # --- REST API Endpoints for NinePlus App & Independent Admin ---
@@ -547,7 +562,7 @@ def login(req: LoginRequest):
 @app.get("/vehicles")
 def get_vehicles():
     """List bound Ninebot vehicles."""
-    payload = run_ninecli_json(["vehicles"], cold_start_retries=2, retry_delay_seconds=1.0)
+    payload = run_ninecli_json(["vehicles"], cold_start_retries=4, retry_delay_seconds=1.0)
     normalized_vehicles = normalize_vehicle_list(payload)
     if normalized_vehicles:
         save_cached_vehicles(normalized_vehicles)
@@ -564,13 +579,13 @@ def get_vehicles():
 @app.get("/vehicles/{sn}/status")
 def get_vehicle_status(sn: str):
     """Get vehicle current status."""
-    return run_ninecli_json(["status", sn], expect_payload=True, cold_start_retries=2, retry_delay_seconds=1.0)
+    return run_ninecli_json(["status", sn], expect_payload=True, cold_start_retries=4, retry_delay_seconds=1.0)
 
 
 @app.get("/vehicles/{sn}/battery")
 def get_vehicle_battery(sn: str):
     """Get vehicle battery details."""
-    return run_ninecli_json(["battery", sn], expect_payload=True, cold_start_retries=2, retry_delay_seconds=1.0)
+    return run_ninecli_json(["battery", sn], expect_payload=True, cold_start_retries=4, retry_delay_seconds=1.0)
 
 
 @app.get("/vehicles/{sn}/travel")
@@ -581,7 +596,7 @@ def get_vehicle_travel(sn: str, month: Optional[str] = None):
     if month:
         ninecli_month = month.replace("-", "")
         cmd.extend(["--month", ninecli_month])
-    travel_data = run_ninecli_json(cmd, expect_payload=True, cold_start_retries=2, retry_delay_seconds=1.0)
+    travel_data = run_ninecli_json(cmd, expect_payload=True, cold_start_retries=4, retry_delay_seconds=1.0)
     
     total_mileage = 0.0
     records = []
@@ -629,7 +644,7 @@ def sync_vehicle_travel(sn: str, month: Optional[str] = None, page_size: Optiona
     if month:
         ninecli_month = month.replace("-", "")
         cmd.extend(["--month", ninecli_month])
-    cli_result = run_ninecli_json(cmd, expect_payload=True, cold_start_retries=2, retry_delay_seconds=1.0)
+    cli_result = run_ninecli_json(cmd, expect_payload=True, cold_start_retries=4, retry_delay_seconds=1.0)
     
     records = []
     total_mileage = 0.0
@@ -683,7 +698,7 @@ def get_vehicle_travel_detail(sn: str, travel_id: str, month: Optional[str] = No
         ninecli_month = month.replace("-", "")
         cmd.extend(["--month", ninecli_month])
         
-    cli_result = run_ninecli_json(cmd, expect_payload=True, cold_start_retries=2, retry_delay_seconds=1.0)
+    cli_result = run_ninecli_json(cmd, expect_payload=True, cold_start_retries=4, retry_delay_seconds=1.0)
     
     records = []
     matched_record = None
@@ -732,9 +747,9 @@ def get_vehicle_dashboard(sn: str):
     Combined Dashboard API requested by NinePlus iOS App.
     Returns status, battery, travel, prediction, totalMileage and latest_ride in a single payload.
     """
-    status = run_ninecli_json(["status", sn], expect_payload=True, cold_start_retries=2, retry_delay_seconds=1.0)
-    travel_data = run_ninecli_json(["travel", sn], expect_payload=True, cold_start_retries=2, retry_delay_seconds=1.0)
-    battery_data = run_ninecli_json(["battery", sn], expect_payload=True, cold_start_retries=2, retry_delay_seconds=1.0)
+    status = run_ninecli_json(["status", sn], expect_payload=True, cold_start_retries=4, retry_delay_seconds=1.0)
+    travel_data = run_ninecli_json(["travel", sn], expect_payload=True, cold_start_retries=4, retry_delay_seconds=1.0)
+    battery_data = run_ninecli_json(["battery", sn], expect_payload=True, cold_start_retries=4, retry_delay_seconds=1.0)
     
     battery_percent = 0
     estimated_range = 0.0
