@@ -19,7 +19,7 @@ logger = logging.getLogger("nineplus_server")
 app = FastAPI(
     title="NinePlus Platform Server",
     description="Standalone Ninebot EV Server powered by ninecli & Token Auth Middleware",
-    version="2.2.0",
+    version="2.3.0",
 )
 
 # Enable CORS for browser access
@@ -153,32 +153,10 @@ def normalize_vehicle(v: dict) -> dict:
     }
 
 
-def format_iso8601(ts_val: Any, fmt_str: Any = None) -> str:
-    """Convert timestamp or date string to ISO8601 UTC format (e.g. 2026-07-30T08:22:07Z)."""
-    if ts_val:
-        try:
-            ts_num = float(ts_val)
-            if ts_num > 1e11:
-                ts_num /= 1000.0
-            dt = datetime.datetime.fromtimestamp(ts_num, tz=datetime.timezone.utc)
-            return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-        except (ValueError, TypeError, OverflowError):
-            pass
-            
-    if fmt_str and isinstance(fmt_str, str):
-        clean = fmt_str.strip().replace(" ", "T")
-        if not clean.endswith("Z") and "+" not in clean:
-            clean += "Z"
-        return clean
-
-    return "2026-07-30T08:00:00Z"
-
-
 def normalize_trip_record(raw_item: dict, index: int = 0) -> dict:
     """
     Normalize Ninebot raw trip record from ninecli.
-    Map Ninebot's plural keys ('mileages', 'travel_id') to standard iOS App expected keys ('mileage', 'id').
-    Format all dates into strict ISO8601 format.
+    Provides ALL field aliases expected by NinePlus iOS App in both Swift & JSON decoders.
     """
     t_id = str(raw_item.get("travel_id") or raw_item.get("id") or raw_item.get("ride_id") or f"ride_{index}")
     
@@ -208,12 +186,27 @@ def normalize_trip_record(raw_item: dict, index: int = 0) -> dict:
 
     start_ts = raw_item.get("start_time") or raw_item.get("started_at")
     end_ts = raw_item.get("end_time") or raw_item.get("ended_at")
-    start_fmt = raw_item.get("start_time_format")
-    end_fmt = raw_item.get("end_time_format")
     
-    start_iso = format_iso8601(start_ts, start_fmt)
-    end_iso = format_iso8601(end_ts, end_fmt)
+    start_str = raw_item.get("start_time_format")
+    end_str = raw_item.get("end_time_format")
     
+    if not start_str and start_ts:
+        try:
+            dt = datetime.datetime.fromtimestamp(float(start_ts), tz=datetime.timezone.utc)
+            start_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            start_str = "2026-07-30 08:00:00"
+            
+    if not end_str and end_ts:
+        try:
+            dt = datetime.datetime.fromtimestamp(float(end_ts), tz=datetime.timezone.utc)
+            end_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            end_str = "2026-07-30 08:15:00"
+            
+    if not start_str: start_str = "2026-07-30 08:00:00"
+    if not end_str: end_str = "2026-07-30 08:15:00"
+
     speed_val = 0.0
     spd = raw_item.get("speed") or raw_item.get("avg_speed") or raw_item.get("max_speed")
     if spd is not None:
@@ -233,21 +226,34 @@ def normalize_trip_record(raw_item: dict, index: int = 0) -> dict:
     normalized = {
         "id": t_id,
         "travel_id": t_id,
+        "travelId": t_id,
         "ride_id": t_id,
+        "rideId": t_id,
         "mileage": mileage_val,
         "mileages": str(mileage_val),
         "distance": mileage_val,
         "mileage_km": mileage_val,
+        "rideMileage": mileage_val,
         "duration": int(duration_sec) if duration_sec > 0 else int(duration_min * 60),
+        "duration_seconds": int(duration_sec),
         "duration_minutes": duration_min,
         "durationMinutes": duration_min,
         "speed": speed_val,
         "avg_speed": speed_val,
-        "started_at": start_iso,
-        "startedAt": start_iso,
-        "ended_at": end_iso,
-        "endedAt": end_iso,
+        "avgSpeed": speed_val,
+        "average_speed": speed_val,
+        "averageSpeed": speed_val,
+        "start_time": start_ts or start_str,
+        "startTime": start_ts or start_str,
+        "started_at": start_str,
+        "startedAt": start_str,
+        "end_time": end_ts or end_str,
+        "endTime": end_ts or end_str,
+        "ended_at": end_str,
+        "endedAt": end_str,
         "used_electricity": energy_val,
+        "usedElectricity": energy_val,
+        "ec": energy_val,
         "energy": energy_val,
         "raw": raw_item
     }
@@ -282,7 +288,7 @@ def startup_event():
 @app.get("/healthz")
 def health_check():
     """Server health check endpoint required by NinePlus App."""
-    return {"status": "ok", "service": "NinePlus Platform Server (Pure Token Mode)", "version": "2.2.0", "active_account": "17740696165"}
+    return {"status": "ok", "service": "NinePlus Platform Server (Pure Token Mode)", "version": "2.3.0", "active_account": "17740696165"}
 
 
 @app.post("/admin/login")
@@ -360,10 +366,15 @@ def get_vehicle_travel(sn: str, month: Optional[str] = None):
                 elif isinstance(item, (int, float, str)) and float(item or 0) > 0:
                     records.append(normalize_trip_record({"mileage": float(item)}, len(records)))
 
+    last_mileage = records[0]["mileage"] if records else 0.0
+
     return {
         "total_mileage": total_mileage,
         "totalMileage": total_mileage,
         "total_mileages": str(total_mileage),
+        "last_mileage": last_mileage,
+        "lastMileage": last_mileage,
+        "list": records,
         "records": records,
         "history": records,
         "raw": travel_data
@@ -398,6 +409,8 @@ def sync_vehicle_travel(sn: str, month: Optional[str] = None, page_size: Optiona
                 elif isinstance(item, (int, float, str)) and float(item or 0) > 0:
                     records.append(normalize_trip_record({"mileage": float(item)}, len(records)))
 
+    last_mileage = records[0]["mileage"] if records else 0.0
+
     return {
         "month": month or "2026-07",
         "page": 1,
@@ -405,7 +418,10 @@ def sync_vehicle_travel(sn: str, month: Optional[str] = None, page_size: Optiona
         "total": len(records),
         "total_mileage": total_mileage,
         "totalMileage": total_mileage,
+        "last_mileage": last_mileage,
+        "lastMileage": last_mileage,
         "hasMore": False,
+        "list": records,
         "records": records,
         "raw": cli_result
     }
@@ -519,6 +535,8 @@ def get_vehicle_dashboard(sn: str):
             if records:
                 latest_ride = records[0]
 
+    last_mileage = latest_ride.get("mileage", 0.0) if latest_ride else 0.0
+
     dashboard_payload = {
         "vehicle": {
             "sn": sn,
@@ -529,6 +547,8 @@ def get_vehicle_dashboard(sn: str):
             **(status if isinstance(status, dict) else {}),
             "total_mileage": total_mileage,
             "totalMileage": total_mileage,
+            "last_mileage": last_mileage,
+            "lastMileage": last_mileage,
             "latest_ride": latest_ride,
             "latestRide": latest_ride
         },
@@ -550,8 +570,11 @@ def get_vehicle_dashboard(sn: str):
             "total_mileage": total_mileage,
             "totalMileage": total_mileage,
             "total_mileages": str(total_mileage),
+            "last_mileage": last_mileage,
+            "lastMileage": last_mileage,
             "latest_ride": latest_ride,
             "latestRide": latest_ride,
+            "list": records,
             "records": records,
             "history": records,
             "raw": travel_data
@@ -809,7 +832,7 @@ HTML_UI = """
     <div class="container">
         <header>
             <h1>⚡ NinePlus 服务端纯 Token 模式后台</h1>
-            <p>基于预生成 Token 的免登录云端中间件 (v2.2 - 完整行程全匹配引擎)</p>
+            <p>基于预生成 Token 的免登录云端中间件 (v2.3 - 终极适配 Swift 模型结构)</p>
             <div class="status-badge">
                 <span style="display:inline-block; width:8px; height:8px; background:#34d399; border-radius:50%;"></span>
                 纯 Token 模式激活 (永不挤掉官方 App)
