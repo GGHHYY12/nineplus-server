@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import json
 import logging
 import os
@@ -18,7 +19,7 @@ logger = logging.getLogger("nineplus_server")
 app = FastAPI(
     title="NinePlus Platform Server",
     description="Standalone Ninebot EV Server powered by ninecli & Token Auth Middleware",
-    version="2.1.0",
+    version="2.2.0",
 )
 
 # Enable CORS for browser access
@@ -152,10 +153,32 @@ def normalize_vehicle(v: dict) -> dict:
     }
 
 
+def format_iso8601(ts_val: Any, fmt_str: Any = None) -> str:
+    """Convert timestamp or date string to ISO8601 UTC format (e.g. 2026-07-30T08:22:07Z)."""
+    if ts_val:
+        try:
+            ts_num = float(ts_val)
+            if ts_num > 1e11:
+                ts_num /= 1000.0
+            dt = datetime.datetime.fromtimestamp(ts_num, tz=datetime.timezone.utc)
+            return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        except (ValueError, TypeError, OverflowError):
+            pass
+            
+    if fmt_str and isinstance(fmt_str, str):
+        clean = fmt_str.strip().replace(" ", "T")
+        if not clean.endswith("Z") and "+" not in clean:
+            clean += "Z"
+        return clean
+
+    return "2026-07-30T08:00:00Z"
+
+
 def normalize_trip_record(raw_item: dict, index: int = 0) -> dict:
     """
     Normalize Ninebot raw trip record from ninecli.
     Map Ninebot's plural keys ('mileages', 'travel_id') to standard iOS App expected keys ('mileage', 'id').
+    Format all dates into strict ISO8601 format.
     """
     t_id = str(raw_item.get("travel_id") or raw_item.get("id") or raw_item.get("ride_id") or f"ride_{index}")
     
@@ -185,7 +208,11 @@ def normalize_trip_record(raw_item: dict, index: int = 0) -> dict:
 
     start_ts = raw_item.get("start_time") or raw_item.get("started_at")
     end_ts = raw_item.get("end_time") or raw_item.get("ended_at")
-    start_str = raw_item.get("start_time_format") or raw_item.get("end_time_format") or "2026-07-30T08:00:00Z"
+    start_fmt = raw_item.get("start_time_format")
+    end_fmt = raw_item.get("end_time_format")
+    
+    start_iso = format_iso8601(start_ts, start_fmt)
+    end_iso = format_iso8601(end_ts, end_fmt)
     
     speed_val = 0.0
     spd = raw_item.get("speed") or raw_item.get("avg_speed") or raw_item.get("max_speed")
@@ -216,10 +243,10 @@ def normalize_trip_record(raw_item: dict, index: int = 0) -> dict:
         "durationMinutes": duration_min,
         "speed": speed_val,
         "avg_speed": speed_val,
-        "started_at": start_ts or start_str,
-        "startedAt": start_ts or start_str,
-        "ended_at": end_ts or start_str,
-        "endedAt": end_ts or start_str,
+        "started_at": start_iso,
+        "startedAt": start_iso,
+        "ended_at": end_iso,
+        "endedAt": end_iso,
         "used_electricity": energy_val,
         "energy": energy_val,
         "raw": raw_item
@@ -255,7 +282,7 @@ def startup_event():
 @app.get("/healthz")
 def health_check():
     """Server health check endpoint required by NinePlus App."""
-    return {"status": "ok", "service": "NinePlus Platform Server (Pure Token Mode)", "version": "2.1.0", "active_account": "17740696165"}
+    return {"status": "ok", "service": "NinePlus Platform Server (Pure Token Mode)", "version": "2.2.0", "active_account": "17740696165"}
 
 
 @app.post("/admin/login")
@@ -310,7 +337,37 @@ def get_vehicle_travel(sn: str, month: Optional[str] = None):
     """Get vehicle travel & ride history requested by NinePlus App."""
     logger.info(f"Fetching travel data for SN: {sn}, month: {month}")
     travel_data = run_ninecli_json(["travel", sn])
-    return travel_data
+    
+    total_mileage = 0.0
+    records = []
+    if isinstance(travel_data, dict):
+        tot = travel_data.get("total_mileages") or travel_data.get("total_mileage") or travel_data.get("totalMileage") or travel_data.get("total_km") or 0.0
+        try:
+            total_mileage = float(str(tot).strip())
+        except (ValueError, TypeError):
+            total_mileage = 0.0
+
+        raw_list = travel_data.get("list") or travel_data.get("history") or travel_data.get("records") or travel_data.get("detail") or []
+        if isinstance(raw_list, list):
+            for idx, item in enumerate(raw_list):
+                if isinstance(item, dict):
+                    if "ride_list" in item and isinstance(item["ride_list"], list):
+                        for sub in item["ride_list"]:
+                            if isinstance(sub, dict):
+                                records.append(normalize_trip_record(sub, len(records)))
+                    else:
+                        records.append(normalize_trip_record(item, len(records)))
+                elif isinstance(item, (int, float, str)) and float(item or 0) > 0:
+                    records.append(normalize_trip_record({"mileage": float(item)}, len(records)))
+
+    return {
+        "total_mileage": total_mileage,
+        "totalMileage": total_mileage,
+        "total_mileages": str(total_mileage),
+        "records": records,
+        "history": records,
+        "raw": travel_data
+    }
 
 
 @app.post("/vehicles/{sn}/travel-sync")
@@ -320,12 +377,18 @@ def sync_vehicle_travel(sn: str, month: Optional[str] = None, page_size: Optiona
     cli_result = run_ninecli_json(["travel", sn])
     
     records = []
+    total_mileage = 0.0
     if isinstance(cli_result, dict):
+        tot = cli_result.get("total_mileages") or cli_result.get("total_mileage") or cli_result.get("totalMileage") or 0.0
+        try:
+            total_mileage = float(str(tot).strip())
+        except (ValueError, TypeError):
+            total_mileage = 0.0
+
         raw_list = cli_result.get("list") or cli_result.get("history") or cli_result.get("records") or cli_result.get("detail") or []
         if isinstance(raw_list, list):
             for idx, item in enumerate(raw_list):
                 if isinstance(item, dict):
-                    # Check if item contains nested ride_list
                     if "ride_list" in item and isinstance(item["ride_list"], list):
                         for r_sub in item["ride_list"]:
                             if isinstance(r_sub, dict):
@@ -340,6 +403,8 @@ def sync_vehicle_travel(sn: str, month: Optional[str] = None, page_size: Optiona
         "page": 1,
         "pageSize": page_size or 20,
         "total": len(records),
+        "total_mileage": total_mileage,
+        "totalMileage": total_mileage,
         "hasMore": False,
         "records": records,
         "raw": cli_result
@@ -363,7 +428,6 @@ def get_vehicle_travel_detail(sn: str, travel_id: str):
         if isinstance(raw_list, list):
             for idx, item in enumerate(raw_list):
                 if isinstance(item, dict):
-                    # Handle nested ride_list
                     sub_items = item["ride_list"] if "ride_list" in item and isinstance(item["ride_list"], list) else [item]
                     for sub in sub_items:
                         if isinstance(sub, dict):
@@ -380,7 +444,6 @@ def get_vehicle_travel_detail(sn: str, travel_id: str):
     if matched_record:
         return matched_record
 
-    # Index fallback
     try:
         clean_id = str(travel_id).replace("ride_", "").replace("trip_", "")
         match_idx = int(clean_id)
@@ -389,14 +452,12 @@ def get_vehicle_travel_detail(sn: str, travel_id: str):
     except ValueError:
         pass
 
-    # Record fallback
     if records:
         fallback = records[0]
         fallback["id"] = travel_id
         fallback["travel_id"] = travel_id
         return fallback
 
-    # Default fallback
     return normalize_trip_record({"travel_id": travel_id, "mileage": 9.20, "duration": 1005, "speed": 68.3}, 0)
 
 
@@ -437,9 +498,9 @@ def get_vehicle_dashboard(sn: str):
         is_charging = (status.get("charging") == 1 or status.get("isCharging") == True)
 
     if isinstance(travel_data, dict):
-        tot = travel_data.get("total_mileage") or travel_data.get("totalMileage") or travel_data.get("total_km") or 0.0
+        tot = travel_data.get("total_mileages") or travel_data.get("total_mileage") or travel_data.get("totalMileage") or travel_data.get("total_km") or 0.0
         try:
-            total_mileage = float(tot)
+            total_mileage = float(str(tot).strip())
         except (ValueError, TypeError):
             total_mileage = 0.0
 
@@ -456,7 +517,7 @@ def get_vehicle_dashboard(sn: str):
                 elif isinstance(item, (int, float, str)) and float(item or 0) > 0:
                     records.append(normalize_trip_record({"mileage": float(item)}, len(records)))
             if records:
-                latest_ride = records[0]  # Most recent trip
+                latest_ride = records[0]
 
     dashboard_payload = {
         "vehicle": {
@@ -488,6 +549,7 @@ def get_vehicle_dashboard(sn: str):
             "estimatedRange": estimated_range,
             "total_mileage": total_mileage,
             "totalMileage": total_mileage,
+            "total_mileages": str(total_mileage),
             "latest_ride": latest_ride,
             "latestRide": latest_ride,
             "records": records,
@@ -747,7 +809,7 @@ HTML_UI = """
     <div class="container">
         <header>
             <h1>⚡ NinePlus 服务端纯 Token 模式后台</h1>
-            <p>基于预生成 Token 的免登录云端中间件 (v2.1 - 精准行程规整引擎)</p>
+            <p>基于预生成 Token 的免登录云端中间件 (v2.2 - 完整行程全匹配引擎)</p>
             <div class="status-badge">
                 <span style="display:inline-block; width:8px; height:8px; background:#34d399; border-radius:50%;"></span>
                 纯 Token 模式激活 (永不挤掉官方 App)
