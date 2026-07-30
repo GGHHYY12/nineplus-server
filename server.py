@@ -81,7 +81,7 @@ def auto_reauth_if_needed():
             logger.warning(f"Silent auto-reauth failed: {e}")
 
 
-def run_ninecli_json(args: List[str], retry_on_auth_fail: Bool = True) -> Any:
+def run_ninecli_json(args: List[str], retry_on_auth_fail: bool = True) -> Any:
     """Execute ninecli CLI binary safely, with automatic re-auth on token expiration."""
     cmd = ["ninecli"] + args
     if "--json" not in args:
