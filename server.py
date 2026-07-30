@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +16,13 @@ from pydantic import BaseModel
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("nineplus_server")
+
+if sys.platform == "win32":
+    NINEBOT_CONFIG_DIR = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "ninebot")
+else:
+    NINEBOT_CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "ninebot")
+
+VEHICLE_CACHE_FILE = os.path.join(NINEBOT_CONFIG_DIR, "vehicles_cache.json")
 
 app = FastAPI(
     title="NinePlus Platform Server",
@@ -34,13 +42,8 @@ app.add_middleware(
 
 def write_ninebot_tokens_to_disk(raw_json_str: str):
     """Write Ninebot token JSON to ninecli's persistent configuration path."""
-    if sys.platform == "win32":
-        config_dir = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "ninebot")
-    else:
-        config_dir = os.path.join(os.path.expanduser("~"), ".config", "ninebot")
-        
-    os.makedirs(config_dir, exist_ok=True)
-    token_file = os.path.join(config_dir, "tokens.json")
+    os.makedirs(NINEBOT_CONFIG_DIR, exist_ok=True)
+    token_file = os.path.join(NINEBOT_CONFIG_DIR, "tokens.json")
     try:
         with open(token_file, "w", encoding="utf-8") as f:
             f.write(raw_json_str)
@@ -51,11 +54,8 @@ def write_ninebot_tokens_to_disk(raw_json_str: str):
 
 def read_ninebot_tokens_from_disk() -> Optional[dict]:
     """Read Ninebot token JSON from ninecli's persistent configuration path."""
-    if sys.platform == "win32":
-        token_file = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "ninebot", "tokens.json")
-    else:
-        token_file = os.path.join(os.path.expanduser("~"), ".config", "ninebot", "tokens.json")
-        
+    token_file = os.path.join(NINEBOT_CONFIG_DIR, "tokens.json")
+
     if os.path.exists(token_file):
         try:
             with open(token_file, "r", encoding="utf-8") as f:
@@ -96,58 +96,147 @@ class AdminAuthStore:
 admin_store = AdminAuthStore()
 
 
-def run_ninecli_json(args: List[str]) -> Any:
+def is_retryable_empty_payload(payload: Any) -> bool:
+    """Treat cold-start empty-success placeholders as retryable instead of real data."""
+    if payload is None:
+        return True
+    if isinstance(payload, dict):
+        keys = set(payload.keys())
+        if keys.issubset({"status", "message"}) and payload.get("status") == "ok":
+            return True
+        if keys.issubset({"status", "raw"}) and payload.get("status") == "ok":
+            return True
+    return False
+
+
+def run_ninecli_json(
+    args: List[str],
+    *,
+    expect_payload: bool = False,
+    cold_start_retries: int = 0,
+    retry_delay_seconds: float = 1.0,
+) -> Any:
     """Execute ninecli CLI binary safely using purely persistent Token (NEVER re-logins)."""
     cmd = ["ninecli"] + args
     if "--json" not in args:
         cmd.append("--json")
-        
-    logger.info(f"Executing command: {' '.join(cmd)}")
-    
-    try:
-        result = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=30)
-        stdout_str = (result.stdout or "").strip()
-        stderr_str = (result.stderr or "").strip()
-        
-        logger.info(f"ninecli returncode: {result.returncode}, stdout len: {len(stdout_str)}, stderr: {repr(stderr_str)}")
-        
-        if "resultDesc=" in stderr_str:
-            match = re.search(r'resultDesc="([^"]+)"', stderr_str)
-            if match:
-                desc = match.group(1)
-                if desc.lower() not in ("success", "ok", "00000"):
-                    logger.warning(f"ninecli returned error desc: {desc}")
-                    if any(keyword in desc.lower() for keyword in ["token", "login", "auth", "expire", "invalid", "unauthorized", "未登录", "失效", "过期"]):
-                        raise HTTPException(status_code=401, detail=f"九号账号授权已过期，请重新登录: {desc}")
-                    raise HTTPException(status_code=400, detail=f"九号服务请求失败: {desc}")
 
-        if result.returncode != 0:
-            err_msg = stderr_str or stdout_str or f"exit code {result.returncode}"
-            logger.error(f"ninecli process error: {err_msg}")
-            
-            # Catch common auth errors in raw output
-            if any(keyword in err_msg.lower() for keyword in ["401", "unauthorized", "token", "expire", "未登录", "失效", "过期"]):
-                raise HTTPException(status_code=401, detail="九号账号授权已失效，请重新登录")
-                
-            raise HTTPException(status_code=400, detail=f"九号服务请求失败: {err_msg}")
-        
-        if stdout_str:
-            try:
-                return json.loads(stdout_str)
-            except json.JSONDecodeError:
-                return {"raw": stdout_str, "status": "ok"}
-        
-        if stderr_str:
-            logger.info(f"ninecli completed successfully with returncode 0 and stderr logs: {stderr_str}")
-            
-        return {"status": "ok", "message": "操作成功"}
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="请求九号服务器超时，请检查网络重试")
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        logger.error(f"ninecli Subprocess error: {e}")
-        raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")
+    logger.info(f"Executing command: {' '.join(cmd)}")
+
+    attempts = max(cold_start_retries + 1, 1)
+    for attempt in range(1, attempts + 1):
+        try:
+            result = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=30)
+            stdout_str = (result.stdout or "").strip()
+            stderr_str = (result.stderr or "").strip()
+
+            logger.info(
+                f"ninecli attempt {attempt}/{attempts}, returncode: {result.returncode}, "
+                f"stdout len: {len(stdout_str)}, stderr: {repr(stderr_str)}"
+            )
+
+            if "resultDesc=" in stderr_str:
+                match = re.search(r'resultDesc="([^"]+)"', stderr_str)
+                if match:
+                    desc = match.group(1)
+                    if desc.lower() not in ("success", "ok", "00000"):
+                        logger.warning(f"ninecli returned error desc: {desc}")
+                        if any(keyword in desc.lower() for keyword in ["token", "login", "auth", "expire", "invalid", "unauthorized", "未登录", "失效", "过期"]):
+                            raise HTTPException(status_code=401, detail=f"九号账号授权已过期，请重新登录: {desc}")
+                        raise HTTPException(status_code=400, detail=f"九号服务请求失败: {desc}")
+
+            if result.returncode != 0:
+                err_msg = stderr_str or stdout_str or f"exit code {result.returncode}"
+                logger.error(f"ninecli process error: {err_msg}")
+
+                if any(keyword in err_msg.lower() for keyword in ["401", "unauthorized", "token", "expire", "未登录", "失效", "过期"]):
+                    raise HTTPException(status_code=401, detail="九号账号授权已失效，请重新登录")
+
+                raise HTTPException(status_code=400, detail=f"九号服务请求失败: {err_msg}")
+
+            if stdout_str:
+                try:
+                    payload = json.loads(stdout_str)
+                except json.JSONDecodeError:
+                    payload = {"raw": stdout_str, "status": "ok"}
+            else:
+                if stderr_str:
+                    logger.info(f"ninecli completed successfully with returncode 0 and stderr logs: {stderr_str}")
+                payload = {"status": "ok", "message": "操作成功"}
+
+            if (expect_payload or cold_start_retries > 0) and is_retryable_empty_payload(payload):
+                if attempt < attempts:
+                    delay = retry_delay_seconds * attempt
+                    logger.warning(
+                        f"ninecli returned retryable empty payload for {' '.join(args)}; retrying in {delay:.1f}s"
+                    )
+                    time.sleep(delay)
+                    continue
+                if expect_payload:
+                    raise HTTPException(status_code=503, detail="九号服务暂未返回有效数据，请稍后重试")
+
+            return payload
+        except subprocess.TimeoutExpired:
+            if attempt < attempts:
+                delay = retry_delay_seconds * attempt
+                logger.warning(f"ninecli timed out for {' '.join(args)}; retrying in {delay:.1f}s")
+                time.sleep(delay)
+                continue
+            raise HTTPException(status_code=504, detail="请求九号服务器超时，请检查网络重试")
+        except Exception as e:
+            if isinstance(e, HTTPException):
+                raise e
+            logger.error(f"ninecli Subprocess error: {e}")
+            raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")
+
+
+def extract_vehicle_items(payload: Any) -> List[dict]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        if isinstance(payload.get("data"), list):
+            return [item for item in payload["data"] if isinstance(item, dict)]
+        if isinstance(payload.get("vehicles"), list):
+            return [item for item in payload["vehicles"] if isinstance(item, dict)]
+        if any(key in payload for key in ["sn", "wnumber", "vin", "id"]):
+            return [payload]
+    return []
+
+
+def normalize_vehicle_list(payload: Any) -> List[dict]:
+    vehicles: List[dict] = []
+    seen_sns = set()
+    for raw_vehicle in extract_vehicle_items(payload):
+        normalized = normalize_vehicle(raw_vehicle)
+        sn = str(normalized.get("sn") or "").strip()
+        if not sn or sn in seen_sns:
+            continue
+        seen_sns.add(sn)
+        vehicles.append(normalized)
+    return vehicles
+
+
+def load_cached_vehicles() -> List[dict]:
+    if not os.path.exists(VEHICLE_CACHE_FILE):
+        return []
+    try:
+        with open(VEHICLE_CACHE_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return normalize_vehicle_list(payload)
+    except Exception as exc:
+        logger.warning(f"Failed to read cached vehicles: {exc}")
+        return []
+
+
+def save_cached_vehicles(vehicles: List[dict]):
+    if not vehicles:
+        return
+    try:
+        os.makedirs(NINEBOT_CONFIG_DIR, exist_ok=True)
+        with open(VEHICLE_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"vehicles": vehicles, "updated_at": datetime.datetime.now(tz=BEIJING_TZ).isoformat()}, f, ensure_ascii=False)
+    except Exception as exc:
+        logger.warning(f"Failed to write cached vehicles: {exc}")
 
 
 def normalize_vehicle(v: dict) -> dict:
@@ -448,7 +537,7 @@ def login(req: LoginRequest):
     logger.info(f"Token update request for Ninebot account: {req.account}")
     
     # Run login through ninecli (saves tokens.json)
-    payload = run_ninecli_json(["login", "-u", req.account, "-p", req.password])
+    payload = run_ninecli_json(["login", "-u", req.account, "-p", req.password], expect_payload=True, cold_start_retries=1)
     
     # Read updated token_data
     token_data = read_ninebot_tokens_from_disk() or (payload if isinstance(payload, dict) else {})
@@ -458,32 +547,30 @@ def login(req: LoginRequest):
 @app.get("/vehicles")
 def get_vehicles():
     """List bound Ninebot vehicles."""
-    payload = run_ninecli_json(["vehicles"])
-    
-    raw_list = []
-    if isinstance(payload, list):
-        raw_list = payload
-    elif isinstance(payload, dict) and "data" in payload and isinstance(payload["data"], list):
-        raw_list = payload["data"]
-    elif isinstance(payload, dict) and "vehicles" in payload and isinstance(payload["vehicles"], list):
-        raw_list = payload["vehicles"]
-    elif isinstance(payload, dict):
-        raw_list = [payload]
-        
-    normalized_vehicles = [normalize_vehicle(v) for v in raw_list if isinstance(v, dict)]
-    return {"vehicles": normalized_vehicles}
+    payload = run_ninecli_json(["vehicles"], cold_start_retries=2, retry_delay_seconds=1.0)
+    normalized_vehicles = normalize_vehicle_list(payload)
+    if normalized_vehicles:
+        save_cached_vehicles(normalized_vehicles)
+        return {"vehicles": normalized_vehicles}
+
+    cached_vehicles = load_cached_vehicles()
+    if cached_vehicles:
+        logger.warning("Serving cached vehicle list because fresh ninecli vehicles payload was empty")
+        return {"vehicles": cached_vehicles, "stale": True, "source": "vehicle_cache"}
+
+    raise HTTPException(status_code=503, detail="九号服务暂未返回有效车辆列表，请稍后重试")
 
 
 @app.get("/vehicles/{sn}/status")
 def get_vehicle_status(sn: str):
     """Get vehicle current status."""
-    return run_ninecli_json(["status", sn])
+    return run_ninecli_json(["status", sn], expect_payload=True, cold_start_retries=2, retry_delay_seconds=1.0)
 
 
 @app.get("/vehicles/{sn}/battery")
 def get_vehicle_battery(sn: str):
     """Get vehicle battery details."""
-    return run_ninecli_json(["battery", sn])
+    return run_ninecli_json(["battery", sn], expect_payload=True, cold_start_retries=2, retry_delay_seconds=1.0)
 
 
 @app.get("/vehicles/{sn}/travel")
@@ -494,7 +581,7 @@ def get_vehicle_travel(sn: str, month: Optional[str] = None):
     if month:
         ninecli_month = month.replace("-", "")
         cmd.extend(["--month", ninecli_month])
-    travel_data = run_ninecli_json(cmd)
+    travel_data = run_ninecli_json(cmd, expect_payload=True, cold_start_retries=2, retry_delay_seconds=1.0)
     
     total_mileage = 0.0
     records = []
@@ -542,7 +629,7 @@ def sync_vehicle_travel(sn: str, month: Optional[str] = None, page_size: Optiona
     if month:
         ninecli_month = month.replace("-", "")
         cmd.extend(["--month", ninecli_month])
-    cli_result = run_ninecli_json(cmd)
+    cli_result = run_ninecli_json(cmd, expect_payload=True, cold_start_retries=2, retry_delay_seconds=1.0)
     
     records = []
     total_mileage = 0.0
@@ -596,7 +683,7 @@ def get_vehicle_travel_detail(sn: str, travel_id: str, month: Optional[str] = No
         ninecli_month = month.replace("-", "")
         cmd.extend(["--month", ninecli_month])
         
-    cli_result = run_ninecli_json(cmd)
+    cli_result = run_ninecli_json(cmd, expect_payload=True, cold_start_retries=2, retry_delay_seconds=1.0)
     
     records = []
     matched_record = None
@@ -645,9 +732,9 @@ def get_vehicle_dashboard(sn: str):
     Combined Dashboard API requested by NinePlus iOS App.
     Returns status, battery, travel, prediction, totalMileage and latest_ride in a single payload.
     """
-    status = run_ninecli_json(["status", sn])
-    travel_data = run_ninecli_json(["travel", sn])
-    battery_data = run_ninecli_json(["battery", sn])
+    status = run_ninecli_json(["status", sn], expect_payload=True, cold_start_retries=2, retry_delay_seconds=1.0)
+    travel_data = run_ninecli_json(["travel", sn], expect_payload=True, cold_start_retries=2, retry_delay_seconds=1.0)
+    battery_data = run_ninecli_json(["battery", sn], expect_payload=True, cold_start_retries=2, retry_delay_seconds=1.0)
     
     battery_percent = 0
     estimated_range = 0.0
