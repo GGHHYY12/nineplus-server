@@ -17,8 +17,8 @@ logger = logging.getLogger("nineplus_server")
 
 app = FastAPI(
     title="NinePlus Platform Server",
-    description="Standalone Ninebot EV Server powered by ninecli & FastAPI",
-    version="1.7.0",
+    description="Standalone Ninebot EV Server powered by ninecli & Token Auth Middleware",
+    version="2.0.0",
 )
 
 # Enable CORS for browser access
@@ -30,70 +30,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Persistent Session & Credential Store File
-SESSION_FILE = os.path.join(os.path.expanduser("~"), ".nineplus_session.json")
-ADMIN_CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".nineplus_admin_config.json")
+# Pre-generated Token for Account 17740696165 (Valid through 2026/2027)
+DEFAULT_TOKEN_JSON = json.dumps({
+  "uuid": "1144394820840722432",
+  "username": "老官官",
+  "phone": "17740696165",
+  "region": "bj",
+  "areaCode": "86",
+  "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMTQ0Mzk0ODIwODQwNzIyNDMyIiwiYXVkaWVuY2UiOiJ1bmtub3duIiwidXNlcl9uYW1lIjoi6IC_5a6P5a6HIiwiY2xpZW50X2lkIjoidmVoaWNsZV9hcHBfcHJvZCIsInJlZ19kYXRlIjoxNjkyODg2NTg3LCJhdWQiOlsiaW90LXdlYmFwcCJdLCJhcmVhQ29kZSI6Ijg2IiwicGhvbmUiOiIxNzc0MDY5NjE2NSIsInNjb3BlIjpbInJlYWQiXSwiZXhwIjoxNzg3OTcwMDQ3LCJyZWdpb24iOiJiaiIsImp0aSI6IlVRT1hCQkFtV3RFcVBpaGh3YzNTWjBueG50byIsImVtYWlsIjpudWxsfQ.lSJ-U0EjRUAcCNgJiFHbZeIak41bFb4JobjVR1665uCYsR0y28oZtvboQLWWT4_dDK_IZslUlwIjQjIjh0w-ik8jbo41ikRWEVLnre6ydIY_ozK_3s86qeMM7oIt2A_tLjHKW4Sfyl55ayrHw4SZNxWbsCqsfhU8gXSQnGKwsPU",
+  "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMTQ0Mzk0ODIwODQwNzIyNDMyIiwiYXVkaWVuY2UiOiJ1bmtub3duIiwidXNlcl9uYW1lIjoi6IC_5a6P5a6HIiwiY2xpZW50X2lkIjoidmVoaWNsZV9hcHBfcHJvZCIsInJlZ19kYXRlIjoxNjkyODg2NTg3LCJhdWQiOlsiaW90LXdlYmFwcCJdLCJhcmVhQ29kZSI6Ijg2IiwicGhvbmUiOiIxNzc0MDY5NjE2NSIsInNjb3BlIjpbInJlYWQiXSwiYXRpIjoiVVFPWEJCQW1XdEVxUGloaHdjM1NaMG54bnRvIiwiZXhwIjoxODAwOTMwMDQ3LCJyZWdpb24iOiJiaiIsImp0aSI6InNOTVFGYzBCa09UR3lld0U5SlBDd3JsTlN1VSIsImVtYWlsIjpudWxsfQ.IR8Q4yWY17x3eR37SnGLkLc_oYiUU64p-XE3o58LBEc65gc-rvdF_QM8WzfjLEmRvDudfZObeXME8GV2d6luvE0Y5w7k9I-REhy79ylDnc_8x4Xq7NbXEIk3JP1V_BCFDs3e-jODlYTwlND_Q43LMEuvYUu7a8jMBO3FW_zV1vk",
+  "accessTokenValidity": "1787970047966",
+  "business_uid": "96665471",
+  "saved_at": 1785378048
+}, ensure_ascii=False)
 
-class NinebotSessionStore:
-    def __init__(self):
-        self.account: Optional[str] = None
-        self.password: Optional[str] = None
-        self.session_token: Optional[str] = None
-        self.load()
 
-    def load(self):
-        # Priority 1: Check Environment Variables (Permanent across Docker rebuilds)
-        env_acc = os.environ.get("NINEBOT_ACCOUNT")
-        env_pwd = os.environ.get("NINEBOT_PASSWORD")
-        if env_acc and env_pwd:
-            self.account = env_acc.strip()
-            self.password = env_pwd.strip()
-            self.session_token = "env_active"
-            logger.info(f"Loaded permanent Ninebot session from Environment Variables for account: {self.account}")
-            return
-
-        # Priority 2: Check Local Ephemeral Disk File
-        if os.path.exists(SESSION_FILE):
-            try:
-                with open(SESSION_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    self.account = data.get("account")
-                    self.password = data.get("password")
-                    self.session_token = data.get("session_token")
-                    logger.info(f"Loaded persistent session from disk for account: {self.account}")
-            except Exception as e:
-                logger.warning(f"Failed to load persistent session file: {e}")
-
-    def save(self, account: str, password: str, session_token: Optional[str] = None):
-        self.account = account
-        self.password = password
-        self.session_token = session_token or "active"
-        try:
-            with open(SESSION_FILE, "w", encoding="utf-8") as f:
-                json.dump({
-                    "account": self.account,
-                    "password": self.password,
-                    "session_token": self.session_token
-                }, f, ensure_ascii=False, indent=2)
-            logger.info(f"Saved persistent session for account: {self.account}")
-        except Exception as e:
-            logger.warning(f"Failed to save persistent session file: {e}")
-
-    def clear(self):
-        self.account = None
-        self.password = None
-        self.session_token = None
-        if os.path.exists(SESSION_FILE):
-            try:
-                os.remove(SESSION_FILE)
-                logger.info("Cleared persistent session file.")
-            except Exception as e:
-                logger.warning(f"Failed to remove session file: {e}")
-
-session_store = NinebotSessionStore()
+def write_ninebot_tokens_to_disk(raw_json_str: str):
+    """Write Ninebot token JSON to ninecli's persistent configuration path."""
+    if sys.platform == "win32":
+        config_dir = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "ninebot")
+    else:
+        config_dir = os.path.join(os.path.expanduser("~"), ".config", "ninebot")
+        
+    os.makedirs(config_dir, exist_ok=True)
+    token_file = os.path.join(config_dir, "tokens.json")
+    try:
+        with open(token_file, "w", encoding="utf-8") as f:
+            f.write(raw_json_str)
+        logger.info(f"Successfully saved persistent Ninebot Token to {token_file}")
+    except Exception as e:
+        logger.warning(f"Failed to save Ninebot token file: {e}")
 
 
 # --- Independent Admin Credentials Store ---
+ADMIN_CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".nineplus_admin_config.json")
+
 class AdminAuthStore:
     def __init__(self):
         self.admin_user = os.environ.get("ADMIN_USER", "admin")
@@ -122,19 +93,8 @@ class AdminAuthStore:
 admin_store = AdminAuthStore()
 
 
-def auto_reauth_if_needed():
-    """Silently re-authenticate ninecli using saved credentials if session expired."""
-    if session_store.account and session_store.password:
-        logger.info(f"Triggering silent auto-reauth for account: {session_store.account}")
-        try:
-            cmd = ["ninecli", "login", "-u", session_store.account, "-p", session_store.password, "--json"]
-            subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=20)
-        except Exception as e:
-            logger.warning(f"Silent auto-reauth failed: {e}")
-
-
-def run_ninecli_json(args: List[str], retry_on_auth_fail: bool = True) -> Any:
-    """Execute ninecli CLI binary safely, with automatic re-auth on token expiration."""
+def run_ninecli_json(args: List[str]) -> Any:
+    """Execute ninecli CLI binary safely using purely persistent Token (NEVER re-logins)."""
     cmd = ["ninecli"] + args
     if "--json" not in args:
         cmd.append("--json")
@@ -148,19 +108,6 @@ def run_ninecli_json(args: List[str], retry_on_auth_fail: bool = True) -> Any:
         
         logger.info(f"ninecli returncode: {result.returncode}, stdout len: {len(stdout_str)}, stderr: {repr(stderr_str)}")
         
-        # Detect token/session expiration error messages
-        is_auth_error = ("unauthorized" in stderr_str.lower() or 
-                         "not login" in stderr_str.lower() or 
-                         "token expired" in stderr_str.lower() or
-                         "resultDesc=\"login" in stderr_str.lower() or
-                         "resultDesc=\"token" in stderr_str.lower())
-
-        if is_auth_error and retry_on_auth_fail and session_store.account:
-            logger.warning("Detected session expiration, attempting silent auto-reauth...")
-            auto_reauth_if_needed()
-            # Retry original command once
-            return run_ninecli_json(args, retry_on_auth_fail=False)
-
         if "resultDesc=" in stderr_str:
             match = re.search(r'resultDesc="([^"]+)"', stderr_str)
             if match:
@@ -214,10 +161,6 @@ class AdminLoginRequest(BaseModel):
     username: str
     password: str
 
-class UpdateAdminPassRequest(BaseModel):
-    new_username: str
-    new_password: str
-
 class BatteryChemistryRequest(BaseModel):
     battery_chemistry: str
     nominal_voltage: Optional[str] = None
@@ -226,11 +169,10 @@ class BatteryChemistryRequest(BaseModel):
 
 @app.on_event("startup")
 def startup_event():
-    """Server startup hook: automatically re-authenticate if saved credentials exist."""
-    logger.info("Initializing NinePlus Server startup sequence...")
-    if session_store.account and session_store.password:
-        logger.info(f"Found saved session for account {session_store.account}, performing background warmup...")
-        auto_reauth_if_needed()
+    """Server startup hook: write token directly to ninecli config folder."""
+    logger.info("Initializing NinePlus Token Server startup sequence...")
+    tokens_json = os.environ.get("NINEBOT_TOKENS_JSON", DEFAULT_TOKEN_JSON)
+    write_ninebot_tokens_to_disk(tokens_json)
 
 
 # --- REST API Endpoints for NinePlus App & Independent Admin ---
@@ -238,7 +180,7 @@ def startup_event():
 @app.get("/healthz")
 def health_check():
     """Server health check endpoint required by NinePlus App."""
-    return {"status": "ok", "service": "NinePlus Platform Server", "version": "1.7.0", "active_account": session_store.account}
+    return {"status": "ok", "service": "NinePlus Platform Server (Pure Token Mode)", "version": "2.0.0", "active_account": "17740696165"}
 
 
 @app.post("/admin/login")
@@ -249,33 +191,17 @@ def admin_login(req: AdminLoginRequest):
     raise HTTPException(status_code=401, detail="管理员用户名或密码错误")
 
 
-@app.post("/admin/update-credentials")
-def update_admin_credentials(req: UpdateAdminPassRequest):
-    """Update Admin username & password."""
-    admin_store.update(req.new_username, req.new_password)
-    return {"status": "ok", "message": "管理员密码更新成功"}
-
-
 @app.post("/accounts/login")
 def login(req: LoginRequest):
-    """Account login endpoint using ninecli with persistent session storage."""
-    logger.info(f"Login request for Ninebot account: {req.account}")
+    """
+    Account login endpoint.
+    If called, fetches new Token using ninecli and updates disk storage.
+    """
+    logger.info(f"Token update request for Ninebot account: {req.account}")
     payload = run_ninecli_json(["login", "-u", req.account, "-p", req.password])
     
-    token = "ninecli_session_active"
-    if isinstance(payload, dict):
-        token = str(payload.get("sessionToken") or payload.get("session_token") or payload.get("token") or "ninecli_session_active")
-        
-    session_store.save(account=req.account, password=req.password, session_token=token)
-    return {"status": "ok", "account": req.account, "sessionToken": session_store.session_token, "details": payload}
-
-
-@app.post("/admin/clear-session")
-def clear_admin_session():
-    """Admin endpoint to clear persistent session token and logout Ninebot account."""
-    account = session_store.account
-    session_store.clear()
-    return {"status": "ok", "message": f"管理员已成功清除账号 {account} 的持久化 Token 并退出会话"}
+    # Reload token from disk if written by ninecli
+    return {"status": "ok", "account": req.account, "details": payload}
 
 
 @app.get("/vehicles")
@@ -570,7 +496,7 @@ HTML_UI = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ NinePlus 服务端独立管理后台</title>
+    <title>⚡ NinePlus 服务端纯 Token 模式后台</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -699,23 +625,9 @@ HTML_UI = """
             box-shadow: 0 6px 20px var(--accent-glow);
         }
 
-        .btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-
         .btn-secondary {
             background: rgba(255, 255, 255, 0.1);
             box-shadow: none;
-        }
-        .btn-secondary:hover {
-            background: rgba(255, 255, 255, 0.2);
-            box-shadow: none;
-        }
-
-        .btn-danger {
-            background: linear-gradient(135deg, #ef4444, #dc2626);
-            box-shadow: 0 4px 14px rgba(239, 68, 68, 0.3);
         }
 
         .metrics-grid {
@@ -765,24 +677,17 @@ HTML_UI = """
             white-space: pre-wrap;
         }
 
-        .admin-box {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 12px;
-            margin-top: 12px;
-        }
-
         .hidden { display: none; }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>⚡ NinePlus 服务端独立管理后台</h1>
-            <p>私有云端中间件后台控制台 (v1.7 - 云端永久环境变量打卡)</p>
+            <h1>⚡ NinePlus 服务端纯 Token 模式后台</h1>
+            <p>基于预生成 Token 的免登录云端中间件 (v2.0)</p>
             <div class="status-badge">
                 <span style="display:inline-block; width:8px; height:8px; background:#34d399; border-radius:50%;"></span>
-                独立管理员系统 (Admin Portal Active)
+                纯 Token 模式激活 (永不挤掉官方 App)
             </div>
         </header>
 
@@ -790,7 +695,7 @@ HTML_UI = """
         <div class="card" id="adminLoginCard">
             <h2>🔐 独立管理员控制台登录</h2>
             <p style="color:var(--text-secondary); font-size:0.85rem; margin-bottom:16px;">
-                请输入管理员后台账号密码（默认账号：<b>admin</b>，默认密码：<b>admin123</b>，绝对不接触九号服务器登录）
+                请输入管理员后台账号密码（默认账号：<b>admin</b>，默认密码：<b>admin123</b>）
             </p>
 
             <div class="form-group">
@@ -839,32 +744,6 @@ HTML_UI = """
             </div>
         </div>
 
-        <!-- 九号账号绑定管理卡片 -->
-        <div class="card hidden" id="ninebotBindCard">
-            <h2>🔑 九号账号绑定管理</h2>
-            <p style="color:var(--text-secondary); font-size:0.85rem; margin-bottom:12px;">
-                当前后台打卡绑定账号：<b id="activeAccountText" style="color:#34d399;">未绑定</b>（支持环境变量 `NINEBOT_ACCOUNT` 跨部署永久打卡）
-            </p>
-
-            <div id="bindForm" class="hidden" style="margin-top:12px; background:rgba(0,0,0,0.3); padding:16px; border-radius:12px;">
-                <h4 style="margin-bottom:8px; font-size:0.95rem;">重新绑定九号账号：</h4>
-                <div class="form-group">
-                    <label>九号手机号</label>
-                    <input type="text" id="ninebotAccountInput" placeholder="13800138000">
-                </div>
-                <div class="form-group">
-                    <label>九号密码</label>
-                    <input type="password" id="ninebotPassInput" placeholder="输入密码">
-                </div>
-                <button class="btn" onclick="doNinebotBind()">提交绑定九号账号</button>
-            </div>
-
-            <div class="admin-box">
-                <button class="btn btn-secondary" onclick="toggleBindForm()">🔄 重新绑定/切换九号账号</button>
-                <button class="btn btn-danger" onclick="clearNinebotSession()">🧹 仅解绑九号账号 (清除持久化Token)</button>
-            </div>
-        </div>
-
         <!-- APP 连接配置指南 -->
         <div class="card hidden" id="connectInfoCard">
             <h2>📱 在 NinePlus iOS App 中填入以下地址：</h2>
@@ -873,7 +752,7 @@ HTML_UI = """
                 <input type="text" id="serverUrlInput" readonly onclick="this.select()">
             </div>
             <p style="color:var(--text-secondary); font-size:0.85rem;">
-                在你的 iPhone 上打开 NinePlus App ➜ 设置页面 ➜ 粘贴上面的地址 ➜ 输入同个账号绑定即可！
+                绑定账号：<b style="color:#34d399;">17740696165</b> | 在你的 iPhone 上打开 NinePlus App ➜ 设置页面 ➜ 粘贴上面的地址绑定即可！
             </p>
         </div>
 
@@ -886,7 +765,6 @@ HTML_UI = """
 
     <script>
         let currentSN = "";
-        let isAdminLoggedIn = false;
 
         function appendLog(text, obj = null) {
             const logBox = document.getElementById("logBox");
@@ -918,83 +796,16 @@ HTML_UI = """
                     throw new Error(data.detail || "管理员认证失败");
                 }
 
-                isAdminLoggedIn = true;
                 appendLog("管理员独立登录成功！");
                 document.getElementById("adminLoginCard").classList.add("hidden");
                 document.getElementById("dashboardCard").classList.remove("hidden");
-                document.getElementById("ninebotBindCard").classList.remove("hidden");
                 document.getElementById("connectInfoCard").classList.remove("hidden");
                 document.getElementById("logCard").classList.remove("hidden");
                 document.getElementById("serverUrlInput").value = window.location.origin;
 
-                await checkServerStatus();
-            } catch (err) {
-                alert("管理员登录失败: " + err.message);
-            }
-        }
-
-        async function checkServerStatus() {
-            try {
-                const res = await fetch("/healthz");
-                const data = await res.json();
-                if (data.active_account) {
-                    document.getElementById("activeAccountText").innerText = data.active_account;
-                    await loadVehicles();
-                } else {
-                    document.getElementById("activeAccountText").innerText = "暂无持久化打卡账号";
-                    document.getElementById("bindForm").classList.remove("hidden");
-                }
-            } catch (e) {
-                appendLog("拉取服务器状态完成");
-            }
-        }
-
-        function toggleBindForm() {
-            const form = document.getElementById("bindForm");
-            form.classList.toggle("hidden");
-        }
-
-        async function doNinebotBind() {
-            const account = document.getElementById("ninebotAccountInput").value.trim();
-            const password = document.getElementById("ninebotPassInput").value.trim();
-
-            if (!account || !password) {
-                alert("请输入九号账号和密码");
-                return;
-            }
-
-            try {
-                const res = await fetch("/accounts/login", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ account, password })
-                });
-                const data = await res.json();
-
-                if (!res.ok) {
-                    throw new Error(data.detail || "绑定失败");
-                }
-
-                appendLog("九号账号绑定成功，打卡 Token 已持久化!", data);
-                alert("绑定成功！");
-                document.getElementById("activeAccountText").innerText = account;
-                document.getElementById("bindForm").classList.add("hidden");
                 await loadVehicles();
             } catch (err) {
-                alert("绑定失败: " + err.message);
-            }
-        }
-
-        async function clearNinebotSession() {
-            if (!confirm("确认要解绑当前九号账号并清除 Token 吗？")) return;
-            try {
-                const res = await fetch("/admin/clear-session", { method: "POST" });
-                const data = await res.json();
-                appendLog("解绑响应:", data);
-                alert("已成功解绑九号账号！");
-                document.getElementById("activeAccountText").innerText = "未绑定";
-            } catch (err) {
-                alert("解绑失败: " + err.message);
+                alert("管理员登录失败: " + err.message);
             }
         }
 
