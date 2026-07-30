@@ -18,7 +18,7 @@ logger = logging.getLogger("nineplus_server")
 app = FastAPI(
     title="NinePlus Platform Server",
     description="Standalone Ninebot EV Server powered by ninecli & FastAPI",
-    version="1.3.0",
+    version="1.4.0",
 )
 
 # Enable CORS for browser access
@@ -66,6 +66,17 @@ class NinebotSessionStore:
             logger.info(f"Saved persistent session for account: {self.account}")
         except Exception as e:
             logger.warning(f"Failed to save persistent session file: {e}")
+
+    def clear(self):
+        self.account = None
+        self.password = None
+        self.session_token = None
+        if os.path.exists(SESSION_FILE):
+            try:
+                os.remove(SESSION_FILE)
+                logger.info("Cleared persistent session file.")
+            except Exception as e:
+                logger.warning(f"Failed to remove session file: {e}")
 
 session_store = NinebotSessionStore()
 
@@ -173,12 +184,12 @@ def startup_event():
         auto_reauth_if_needed()
 
 
-# --- REST API Endpoints for NinePlus App ---
+# --- REST API Endpoints for NinePlus App & Admin ---
 
 @app.get("/healthz")
 def health_check():
     """Server health check endpoint required by NinePlus App."""
-    return {"status": "ok", "service": "NinePlus Platform Server", "version": "1.3.0", "active_account": session_store.account}
+    return {"status": "ok", "service": "NinePlus Platform Server", "version": "1.4.0", "active_account": session_store.account}
 
 
 @app.post("/accounts/login")
@@ -193,6 +204,14 @@ def login(req: LoginRequest):
         
     session_store.save(account=req.account, password=req.password, session_token=token)
     return {"status": "ok", "account": req.account, "sessionToken": session_store.session_token, "details": payload}
+
+
+@app.post("/admin/clear-session")
+def clear_admin_session():
+    """Admin endpoint to clear persistent session token and logout."""
+    account = session_store.account
+    session_store.clear()
+    return {"status": "ok", "message": f"管理员已成功清除账号 {account} 的持久化 Token 并退出会话"}
 
 
 @app.get("/vehicles")
@@ -438,7 +457,7 @@ HTML_UI = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ NinePlus 服务端控制台 & 车辆调试工具</title>
+    <title>⚡ NinePlus 服务端控制台 & 管理中心</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -633,14 +652,20 @@ HTML_UI = """
             white-space: pre-wrap;
         }
 
+        .admin-box {
+            display: flex;
+            gap: 12px;
+            margin-top: 12px;
+        }
+
         .hidden { display: none; }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>⚡ NinePlus 服务端控制台 & 车辆调试工具</h1>
-            <p>基于 ninecli 逆向引擎的九号电动车独立 API 中间件 (v1.3 - 自动静默持久化)</p>
+            <h1>⚡ NinePlus 服务端控制台 & 管理中心</h1>
+            <p>基于 ninecli 逆向引擎的九号电动车独立 API 中间件 (v1.4)</p>
             <div class="status-badge">
                 <span style="display:inline-block; width:8px; height:8px; background:#34d399; border-radius:50%;"></span>
                 ninecli 引擎就绪 (Ready)
@@ -649,7 +674,7 @@ HTML_UI = """
 
         <!-- 登录卡片 -->
         <div class="card" id="loginCard">
-            <h2>🔑 登录九号账号</h2>
+            <h2>🔑 登录九号账号 (初始化服务器)</h2>
             <p style="color:var(--text-secondary); font-size:0.85rem; margin-bottom:16px;">
                 输入你的九号 App 绑定的手机号和密码（使用 ninecli 引擎安全认证，支持自动持久化与无感恢复）
             </p>
@@ -700,6 +725,18 @@ HTML_UI = """
             </div>
         </div>
 
+        <!-- 管理员控制中心卡片 -->
+        <div class="card hidden" id="adminControlCard">
+            <h2>🛠️ 管理员控制面板</h2>
+            <p style="color:var(--text-secondary); font-size:0.85rem; margin-bottom:12px;">
+                当前管理绑定账号：<b id="activeAccountText" style="color:#34d399;">--</b> （服务器具有自动永久打卡与持久化权限）
+            </p>
+            <div class="admin-box">
+                <button class="btn btn-secondary" onclick="loadVehicles()">🔄 手动刷新并拉取最新凭证</button>
+                <button class="btn btn-danger" onclick="clearAdminSession()">🧹 清除当前凭证并解绑退出</button>
+            </div>
+        </div>
+
         <!-- APP 连接配置指南 -->
         <div class="card hidden" id="connectInfoCard">
             <h2>📱 在 NinePlus iOS App 中填入以下地址：</h2>
@@ -731,6 +768,25 @@ HTML_UI = """
             logBox.innerText = msg + "\\n\\n" + logBox.innerText;
         }
 
+        async function checkServerHealth() {
+            try {
+                const res = await fetch("/healthz");
+                const data = await res.json();
+                if (data.active_account) {
+                    appendLog(`检测到服务器已持久化绑定管理员账号: ${data.active_account}`);
+                    document.getElementById("activeAccountText").innerText = data.active_account;
+                    document.getElementById("loginCard").classList.add("hidden");
+                    document.getElementById("dashboardCard").classList.remove("hidden");
+                    document.getElementById("adminControlCard").classList.remove("hidden");
+                    document.getElementById("connectInfoCard").classList.remove("hidden");
+                    document.getElementById("serverUrlInput").value = window.location.origin;
+                    await loadVehicles();
+                }
+            } catch (e) {
+                appendLog("健康检查完成");
+            }
+        }
+
         async function doLogin() {
             const account = document.getElementById("accountInput").value.trim();
             const password = document.getElementById("passwordInput").value.trim();
@@ -757,12 +813,13 @@ HTML_UI = """
                     throw new Error(data.detail || "登录失败");
                 }
 
-                appendLog("九号账号登录成功!", data);
+                appendLog("九号账号登录成功，凭证已永久持久化存入服务器!", data);
+                document.getElementById("activeAccountText").innerText = account;
                 document.getElementById("loginCard").classList.add("hidden");
                 document.getElementById("dashboardCard").classList.remove("hidden");
+                document.getElementById("adminControlCard").classList.remove("hidden");
                 document.getElementById("connectInfoCard").classList.remove("hidden");
                 
-                // Show Server IP / Local Address for App
                 const localIP = window.location.origin;
                 document.getElementById("serverUrlInput").value = localIP;
 
@@ -773,6 +830,19 @@ HTML_UI = """
             } finally {
                 loginBtn.disabled = false;
                 loginBtn.innerText = "确认登录并获取车辆数据";
+            }
+        }
+
+        async function clearAdminSession() {
+            if (!confirm("确认要作为管理员清除持久化 Token 并解绑下线吗？")) return;
+            try {
+                const res = await fetch("/admin/clear-session", { method: "POST" });
+                const data = await res.json();
+                appendLog("管理员清理凭证:", data);
+                alert("凭证已清除！服务器已解绑");
+                window.location.reload();
+            } catch (err) {
+                alert("清理失败: " + err.message);
             }
         }
 
@@ -846,6 +916,9 @@ HTML_UI = """
                 alert("发送指令失败: " + err.message);
             }
         }
+
+        // On page load, auto check health
+        checkServerHealth();
     </script>
 </body>
 </html>
@@ -853,7 +926,7 @@ HTML_UI = """
 
 @app.get("/", response_class=HTMLResponse)
 def index_ui():
-    """Renders the Interactive Web Console for Browser testing."""
+    """Renders the Interactive Web Console & Admin Panel."""
     return HTML_UI
 
 
