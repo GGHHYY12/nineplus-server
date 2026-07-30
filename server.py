@@ -191,16 +191,44 @@ def run_ninecli_json(
 
 
 def extract_vehicle_items(payload: Any) -> List[dict]:
-    if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)]
-    if isinstance(payload, dict):
-        if isinstance(payload.get("data"), list):
-            return [item for item in payload["data"] if isinstance(item, dict)]
-        if isinstance(payload.get("vehicles"), list):
-            return [item for item in payload["vehicles"] if isinstance(item, dict)]
-        if any(key in payload for key in ["sn", "wnumber", "vin", "id"]):
-            return [payload]
-    return []
+    seen: set[int] = set()
+
+    def walk(value: Any) -> Optional[List[dict]]:
+        marker = id(value)
+        if marker in seen:
+            return None
+        seen.add(marker)
+
+        if isinstance(value, list):
+            dict_items = [item for item in value if isinstance(item, dict)]
+            if dict_items:
+                return dict_items
+            for item in value:
+                found = walk(item)
+                if found:
+                    return found
+            return None
+
+        if isinstance(value, dict):
+            if any(key in value for key in ["sn", "wnumber", "vin", "id"]):
+                return [value]
+
+            for key in ("vehicles", "vehicle", "list", "records", "items", "data", "result", "detail", "rows", "payload"):
+                nested = value.get(key)
+                if nested is None:
+                    continue
+                found = walk(nested)
+                if found:
+                    return found
+
+            for nested in value.values():
+                found = walk(nested)
+                if found:
+                    return found
+
+        return None
+
+    return walk(payload) or []
 
 
 def normalize_vehicle_list(payload: Any) -> List[dict]:
@@ -567,6 +595,11 @@ def get_vehicles():
     if normalized_vehicles:
         save_cached_vehicles(normalized_vehicles)
         return {"vehicles": normalized_vehicles}
+
+    if isinstance(payload, dict):
+        logger.warning(f"Vehicles payload had no usable vehicles; keys={list(payload.keys())}")
+    else:
+        logger.warning(f"Vehicles payload had no usable vehicles; type={type(payload).__name__}")
 
     cached_vehicles = load_cached_vehicles()
     if cached_vehicles:
