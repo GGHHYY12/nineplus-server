@@ -235,7 +235,7 @@ def normalize_trip_record(raw_item: dict, index: int = 0) -> dict:
         except (ValueError, TypeError):
             pass
             
-    duration_min = round(duration_sec / 60.0, 1) if duration_sec > 120 else round(duration_sec, 1)
+    duration_min = round(duration_sec / 60.0, 1)
     if duration_min <= 0:
         duration_min = float(raw_item.get("duration_minutes") or raw_item.get("durationMinutes") or 15.0)
 
@@ -389,7 +389,11 @@ def get_vehicle_battery(sn: str):
 def get_vehicle_travel(sn: str, month: Optional[str] = None):
     """Get vehicle travel & ride history requested by NinePlus App."""
     logger.info(f"Fetching travel data for SN: {sn}, month: {month}")
-    travel_data = run_ninecli_json(["travel", sn])
+    cmd = ["travel", sn]
+    if month:
+        ninecli_month = month.replace("-", "")
+        cmd.extend(["--month", ninecli_month])
+    travel_data = run_ninecli_json(cmd)
     
     total_mileage = 0.0
     records = []
@@ -424,6 +428,7 @@ def get_vehicle_travel(sn: str, month: Optional[str] = None):
         "list": records,
         "records": records,
         "history": records,
+        "detail": travel_data.get("detail", []),
         "raw": travel_data
     }
 
@@ -432,7 +437,11 @@ def get_vehicle_travel(sn: str, month: Optional[str] = None):
 def sync_vehicle_travel(sn: str, month: Optional[str] = None, page_size: Optional[int] = 20):
     """Sync vehicle travel page for iOS App."""
     logger.info(f"Syncing travel page for SN: {sn}, month: {month}")
-    cli_result = run_ninecli_json(["travel", sn])
+    cmd = ["travel", sn]
+    if month:
+        ninecli_month = month.replace("-", "")
+        cmd.extend(["--month", ninecli_month])
+    cli_result = run_ninecli_json(cmd)
     
     records = []
     total_mileage = 0.0
@@ -475,13 +484,18 @@ def sync_vehicle_travel(sn: str, month: Optional[str] = None, page_size: Optiona
 
 
 @app.get("/vehicles/{sn}/travel/{travel_id}")
-def get_vehicle_travel_detail(sn: str, travel_id: str):
+def get_vehicle_travel_detail(sn: str, travel_id: str, month: Optional[str] = None):
     """
     Get detail for a specific trip/ride requested by NinePlus App detail view.
     Parses Ninebot's raw travel list and matches travel_id to return normalized record.
     """
     logger.info(f"Fetching travel detail for SN: {sn}, travel_id: {travel_id}")
-    cli_result = run_ninecli_json(["travel", sn])
+    cmd = ["travel", sn]
+    if month:
+        ninecli_month = month.replace("-", "")
+        cmd.extend(["--month", ninecli_month])
+        
+    cli_result = run_ninecli_json(cmd)
     
     records = []
     matched_record = None
@@ -621,6 +635,7 @@ def get_vehicle_dashboard(sn: str):
             "lastMileage": last_mileage,
             "latest_ride": latest_ride,
             "latestRide": latest_ride,
+            "detail": travel_data.get("detail", []),
             "list": records,
             "records": records,
             "history": records,
