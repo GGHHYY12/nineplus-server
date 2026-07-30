@@ -384,6 +384,21 @@ def login(req: LoginRequest):
     """Account login endpoint using ninecli."""
     logger.info(f"Token update request for Ninebot account: {req.account}")
     payload = run_ninecli_json(["login", "-u", req.account, "-p", req.password])
+    
+    # After successful login, ninecli writes to tokens.json. The iOS app expects the token structure (with username) in details.
+    if sys.platform == "win32":
+        token_file = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "ninebot", "tokens.json")
+    else:
+        token_file = os.path.join(os.path.expanduser("~"), ".config", "ninebot", "tokens.json")
+        
+    if os.path.exists(token_file):
+        try:
+            with open(token_file, "r", encoding="utf-8") as f:
+                token_data = json.load(f)
+                return {"status": "ok", "account": req.account, "details": token_data}
+        except Exception:
+            pass
+            
     return {"status": "ok", "account": req.account, "details": payload}
 
 
