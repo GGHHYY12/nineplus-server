@@ -31,20 +31,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Pre-generated Token for Account 17740696165 (Valid through 2026/2027)
-DEFAULT_TOKEN_JSON = json.dumps({
-  "uuid": "1144394820840722432",
-  "username": "老官官",
-  "phone": "17740696165",
-  "region": "bj",
-  "areaCode": "86",
-  "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMTQ0Mzk0ODIwODQwNzIyNDMyIiwiYXVkaWVuY2UiOiJ1bmtub3duIiwidXNlcl9uYW1lIjoi6IC_5a6P5a6HIiwiY2xpZW50X2lkIjoidmVoaWNsZV9hcHBfcHJvZCIsInJlZ19kYXRlIjoxNjkyODg2NTg3LCJhdWQiOlsiaW90LXdlYmFwcCJdLCJhcmVhQ29kZSI6Ijg2IiwicGhvbmUiOiIxNzc0MDY5NjE2NSIsInNjb3BlIjpbInJlYWQiXSwiZXhwIjoxNzg3OTcwMDQ3LCJyZWdpb24iOiJiaiIsImp0aSI6IlVRT1hCQkFtV3RFcVBpaGh3YzNTWjBueG50byIsImVtYWlsIjpudWxsfQ.lSJ-U0EjRUAcCNgJiFHbZeIak41bFb4JobjVR1665uCYsR0y28oZtvboQLWWT4_dDK_IZslUlwIjQjIjh0w-ik8jbo41ikRWEVLnre6ydIY_ozK_3s86qeMM7oIt2A_tLjHKW4Sfyl55ayrHw4SZNxWbsCqsfhU8gXSQnGKwsPU",
-  "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMTQ0Mzk0ODIwODQwNzIyNDMyIiwiYXVkaWVuY2UiOiJ1bmtub3duIiwidXNlcl9uYW1lIjoi6IC_5a6P5a6HIiwiY2xpZW50X2lkIjoidmVoaWNsZV9hcHBfcHJvZCIsInJlZ19kYXRlIjoxNjkyODg2NTg3LCJhdWQiOlsiaW90LXdlYmFwcCJdLCJhcmVhQ29kZSI6Ijg2IiwicGhvbmUiOiIxNzc0MDY5NjE2NSIsInNjb3BlIjpbInJlYWQiXSwiYXRpIjoiVVFPWEJCQW1XdEVxUGloaHdjM3NaMG54bnRvIiwiZXhwIjoxODAwOTMwMDQ3LCJyZWdpb24iOiJiaiIsImp0aSI6InNOTVFGYzBCa09UR3lld0U5SlBDd3JsTlN1VSIsImVtYWlsIjpudWxsfQ.IR8Q4yWY17x3eR37SnGLkLc_oYiUU64p-XE3o58LBEc65gc-rvdF_QM8WzfjLEmRvDudfZObeXME8GV2d6luvE0Y5w7k9I-REhy79ylDnc_8x4Xq7NbXEIk3JP1V_BCFDs3e-jODlYTwlND_Q43LMEuvYUu7a8jMBO3FW_zV1vk",
-  "accessTokenValidity": "1787970047966",
-  "business_uid": "96665471",
-  "saved_at": 1785378048
-}, ensure_ascii=False)
-
 
 def write_ninebot_tokens_to_disk(raw_json_str: str):
     """Write Ninebot token JSON to ninecli's persistent configuration path."""
@@ -61,6 +47,22 @@ def write_ninebot_tokens_to_disk(raw_json_str: str):
         logger.info(f"Successfully saved persistent Ninebot Token to {token_file}")
     except Exception as e:
         logger.warning(f"Failed to save Ninebot token file: {e}")
+
+
+def read_ninebot_tokens_from_disk() -> Optional[dict]:
+    """Read Ninebot token JSON from ninecli's persistent configuration path."""
+    if sys.platform == "win32":
+        token_file = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "ninebot", "tokens.json")
+    else:
+        token_file = os.path.join(os.path.expanduser("~"), ".config", "ninebot", "tokens.json")
+        
+    if os.path.exists(token_file):
+        try:
+            with open(token_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return None
 
 
 # --- Independent Admin Credentials Store ---
@@ -115,11 +117,18 @@ def run_ninecli_json(args: List[str]) -> Any:
                 desc = match.group(1)
                 if desc.lower() not in ("success", "ok", "00000"):
                     logger.warning(f"ninecli returned error desc: {desc}")
+                    if any(keyword in desc.lower() for keyword in ["token", "login", "auth", "expire", "invalid", "unauthorized", "未登录", "失效", "过期"]):
+                        raise HTTPException(status_code=401, detail=f"九号账号授权已过期，请重新登录: {desc}")
                     raise HTTPException(status_code=400, detail=f"九号服务请求失败: {desc}")
 
         if result.returncode != 0:
             err_msg = stderr_str or stdout_str or f"exit code {result.returncode}"
             logger.error(f"ninecli process error: {err_msg}")
+            
+            # Catch common auth errors in raw output
+            if any(keyword in err_msg.lower() for keyword in ["401", "unauthorized", "token", "expire", "未登录", "失效", "过期"]):
+                raise HTTPException(status_code=401, detail="九号账号授权已失效，请重新登录")
+                
             raise HTTPException(status_code=400, detail=f"九号服务请求失败: {err_msg}")
         
         if stdout_str:
@@ -129,8 +138,7 @@ def run_ninecli_json(args: List[str]) -> Any:
                 return {"raw": stdout_str, "status": "ok"}
         
         if stderr_str:
-            logger.error(f"ninecli returned empty stdout but has stderr: {stderr_str}")
-            raise HTTPException(status_code=502, detail=f"九号服务异常: {stderr_str}")
+            logger.info(f"ninecli completed successfully with returncode 0 and stderr logs: {stderr_str}")
             
         return {"status": "ok", "message": "操作成功"}
     except subprocess.TimeoutExpired:
@@ -307,6 +315,54 @@ def normalize_trip_record(raw_item: dict, index: int = 0) -> dict:
     return normalized
 
 
+def normalize_user_details(token_data: dict, account: str = "") -> dict:
+    """Provide exhaustive field aliases for NinePlus Swift Codable decoders."""
+    if not isinstance(token_data, dict):
+        token_data = {}
+        
+    access_token = str(token_data.get("access_token") or token_data.get("token") or token_data.get("accessToken") or "")
+    refresh_token = str(token_data.get("refresh_token") or token_data.get("refreshToken") or "")
+    uuid_val = str(token_data.get("uuid") or token_data.get("uid") or token_data.get("user_id") or token_data.get("userId") or token_data.get("id") or "1144394820840722432")
+    username_val = str(token_data.get("username") or token_data.get("nickname") or token_data.get("nickName") or token_data.get("name") or token_data.get("userName") or "九号用户")
+    phone_val = str(token_data.get("phone") or token_data.get("mobile") or token_data.get("phoneNumber") or account or "")
+    area_code = str(token_data.get("areaCode") or token_data.get("area_code") or "86")
+    region_val = str(token_data.get("region") or "bj")
+    business_uid = str(token_data.get("business_uid") or token_data.get("businessUID") or "96665471")
+
+    normalized = {
+        **token_data,
+        "status": "ok",
+        "account": phone_val,
+        "phone": phone_val,
+        "mobile": phone_val,
+        "phoneNumber": phone_val,
+        "uuid": uuid_val,
+        "uid": uuid_val,
+        "user_id": uuid_val,
+        "userId": uuid_val,
+        "id": uuid_val,
+        "session_token": access_token,
+        "sessionToken": access_token,
+        "access_token": access_token,
+        "accessToken": access_token,
+        "token": access_token,
+        "refresh_token": refresh_token,
+        "refreshToken": refresh_token,
+        "area_code": area_code,
+        "areaCode": area_code,
+        "region": region_val,
+        "business_uid": business_uid,
+        "businessUID": business_uid,
+        "username": username_val,
+        "userName": username_val,
+        "nickname": username_val,
+        "nickName": username_val,
+        "name": username_val,
+        "details": token_data
+    }
+    return normalized
+
+
 # --- Pydantic Models ---
 class LoginRequest(BaseModel):
     account: str
@@ -324,10 +380,13 @@ class BatteryChemistryRequest(BaseModel):
 
 @app.on_event("startup")
 def startup_event():
-    """Server startup hook: write token directly to ninecli config folder."""
+    """Server startup hook: restore token from environment variable if provided."""
     logger.info("Initializing NinePlus Token Server startup sequence...")
-    tokens_json = os.environ.get("NINEBOT_TOKENS_JSON", DEFAULT_TOKEN_JSON)
-    write_ninebot_tokens_to_disk(tokens_json)
+    tokens_json = os.environ.get("NINEBOT_TOKENS_JSON")
+    if tokens_json:
+        write_ninebot_tokens_to_disk(tokens_json)
+    else:
+        logger.info("No NINEBOT_TOKENS_JSON env var provided. Depending on existing ninecli tokens.json")
 
 
 # --- REST API Endpoints for NinePlus App & Independent Admin ---
@@ -335,7 +394,9 @@ def startup_event():
 @app.get("/healthz")
 def health_check():
     """Server health check endpoint required by NinePlus App."""
-    return {"status": "ok", "service": "NinePlus Platform Server (Pure Token Mode)", "version": "2.5.0", "active_account": "17740696165"}
+    token_data = read_ninebot_tokens_from_disk()
+    active_account = token_data.get("phone", "未登录") if token_data else "未登录"
+    return {"status": "ok", "service": "NinePlus Platform Server", "version": "2.5.0", "active_account": active_account}
 
 
 @app.post("/admin/login")
@@ -346,64 +407,52 @@ def admin_login(req: AdminLoginRequest):
     raise HTTPException(status_code=401, detail="管理员用户名或密码错误")
 
 
+@app.delete("/admin/token")
+def admin_delete_token(req: AdminLoginRequest):
+    """Securely delete the Ninebot token file (Admin only)."""
+    if req.username == admin_store.admin_user and req.password == admin_store.admin_pass:
+        if sys.platform == "win32":
+            token_file = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "ninebot", "tokens.json")
+        else:
+            token_file = os.path.join(os.path.expanduser("~"), ".config", "ninebot", "tokens.json")
+            
+        if os.path.exists(token_file):
+            os.remove(token_file)
+            return {"status": "ok", "message": "九号账号授权 (Token) 已安全清除"}
+        return {"status": "ok", "message": "服务端目前没有保存任何 Token"}
+    raise HTTPException(status_code=401, detail="管理员用户名或密码错误")
+
+
+@app.post("/admin/export-token")
+def admin_export_token(req: AdminLoginRequest):
+    """Securely export the current Ninebot token JSON string for Render Environment Variables."""
+    if req.username == admin_store.admin_user and req.password == admin_store.admin_pass:
+        if sys.platform == "win32":
+            token_file = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "ninebot", "tokens.json")
+        else:
+            token_file = os.path.join(os.path.expanduser("~"), ".config", "ninebot", "tokens.json")
+            
+        if os.path.exists(token_file):
+            try:
+                with open(token_file, "r", encoding="utf-8") as f:
+                    return {"status": "ok", "token_json_string": f.read()}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"无法读取 Token 文件: {e}")
+        return {"status": "error", "message": "目前没有保存在本地的 Token，请先登录。"}
+    raise HTTPException(status_code=401, detail="管理员用户名或密码错误")
+
+
 @app.post("/accounts/login")
 def login(req: LoginRequest):
     """Account login endpoint using ninecli."""
     logger.info(f"Token update request for Ninebot account: {req.account}")
     
-    token_data = None
-    if sys.platform == "win32":
-        token_file = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "ninebot", "tokens.json")
-    else:
-        token_file = os.path.join(os.path.expanduser("~"), ".config", "ninebot", "tokens.json")
-        
-    if os.path.exists(token_file):
-        try:
-            with open(token_file, "r", encoding="utf-8") as f:
-                token_data = json.load(f)
-        except Exception:
-            pass
-            
-    if not token_data and DEFAULT_TOKEN_JSON:
-        try:
-            token_data = json.loads(DEFAULT_TOKEN_JSON)
-        except Exception:
-            pass
-
-    try:
-        payload = run_ninecli_json(["login", "-u", req.account, "-p", req.password])
-        if os.path.exists(token_file):
-            with open(token_file, "r", encoding="utf-8") as f:
-                token_data = json.load(f)
-    except Exception as e:
-        logger.warning(f"ninecli login failed ({e}), using fallback token_data...")
-
-    info = token_data if isinstance(token_data, dict) else {}
-    access_token = str(info.get("access_token") or info.get("token") or "")
-    refresh_token = str(info.get("refresh_token") or "")
-    phone_val = str(info.get("phone") or req.account or "17740696165")
-    uuid_val = str(info.get("uuid") or "1144394820840722432")
-    area_code = str(info.get("areaCode") or info.get("area_code") or "86")
-    region_val = str(info.get("region") or "bj")
-    business_uid = str(info.get("business_uid") or info.get("businessUID") or "96665471")
-
-    return {
-        "status": "ok",
-        "account": phone_val,
-        "phone": phone_val,
-        "uuid": uuid_val,
-        "session_token": access_token,
-        "sessionToken": access_token,
-        "access_token": access_token,
-        "token": access_token,
-        "refresh_token": refresh_token,
-        "area_code": area_code,
-        "areaCode": area_code,
-        "region": region_val,
-        "business_uid": business_uid,
-        "businessUID": business_uid,
-        "details": info
-    }
+    # Run login through ninecli (saves tokens.json)
+    payload = run_ninecli_json(["login", "-u", req.account, "-p", req.password])
+    
+    # Read updated token_data
+    token_data = read_ninebot_tokens_from_disk() or (payload if isinstance(payload, dict) else {})
+    return normalize_user_details(token_data, req.account)
 
 
 @app.get("/vehicles")
@@ -760,7 +809,7 @@ HTML_UI = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ NinePlus 服务端纯 Token 模式后台</title>
+    <title>⚡ NinePlus 服务端控制台</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -768,16 +817,12 @@ HTML_UI = """
             --bg-card: rgba(30, 41, 59, 0.7);
             --border-card: rgba(255, 255, 255, 0.1);
             --accent: #10b981;
-            --accent-glow: rgba(16, 185, 129, 0.3);
             --text-primary: #f8fafc;
             --text-secondary: #94a3b8;
-            --danger: #ef4444;
-            --warning: #f59e0b;
         }
-
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-family: 'Outfit', sans-serif;
             background: radial-gradient(circle at top right, #1e1b4b, #0f172a);
             color: var(--text-primary);
             min-height: 100vh;
@@ -785,365 +830,22 @@ HTML_UI = """
             display: flex;
             justify-content: center;
         }
-
-        .container {
-            width: 100%;
-            max-width: 900px;
-        }
-
-        header {
-            text-align: center;
-            margin-bottom: 28px;
-        }
-
+        .container { width: 100%; max-width: 900px; }
+        header { text-align: center; margin-bottom: 28px; }
         header h1 {
-            font-size: 2rem;
-            font-weight: 700;
-            background: linear-gradient(135deg, #34d399, #10b981, #06b6d4);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 8px;
+            font-size: 2rem; font-weight: 700;
+            background: linear-gradient(135deg, #34d399, #10b981);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
         }
-
-        header p {
-            color: var(--text-secondary);
-            font-size: 0.95rem;
-        }
-
-        .status-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 6px 14px;
-            background: rgba(16, 185, 129, 0.15);
-            border: 1px solid rgba(16, 185, 129, 0.3);
-            border-radius: 20px;
-            color: #34d399;
-            font-size: 0.85rem;
-            font-weight: 600;
-            margin-top: 10px;
-        }
-
-        .card {
-            background: var(--bg-card);
-            backdrop-filter: blur(12px);
-            border: 1px solid var(--border-card);
-            border-radius: 20px;
-            padding: 24px;
-            margin-bottom: 20px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
-        }
-
-        .card h2 {
-            font-size: 1.25rem;
-            margin-bottom: 16px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        .form-group {
-            margin-bottom: 16px;
-        }
-
-        .form-group label {
-            display: block;
-            font-size: 0.85rem;
-            color: var(--text-secondary);
-            margin-bottom: 6px;
-        }
-
-        input {
-            width: 100%;
-            padding: 12px 16px;
-            background: rgba(15, 23, 42, 0.6);
-            border: 1px solid rgba(255, 255, 255, 0.15);
-            border-radius: 12px;
-            color: var(--text-primary);
-            font-size: 1rem;
-            outline: none;
-            transition: all 0.2s ease;
-        }
-
-        input:focus {
-            border-color: var(--accent);
-            box-shadow: 0 0 12px var(--accent-glow);
-        }
-
-        .btn {
-            width: 100%;
-            padding: 14px;
-            background: linear-gradient(135deg, #10b981, #059669);
-            border: none;
-            border-radius: 12px;
-            color: white;
-            font-size: 1rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            box-shadow: 0 4px 14px var(--accent-glow);
-        }
-
-        .btn:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 6px 20px var(--accent-glow);
-        }
-
-        .btn-secondary {
-            background: rgba(255, 255, 255, 0.1);
-            box-shadow: none;
-        }
-
-        .metrics-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 16px;
-            margin-top: 16px;
-        }
-
-        .metric-box {
-            background: rgba(15, 23, 42, 0.5);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 16px;
-            padding: 16px;
-            text-align: center;
-        }
-
-        .metric-box .label {
-            font-size: 0.8rem;
-            color: var(--text-secondary);
-            margin-bottom: 6px;
-        }
-
-        .metric-box .value {
-            font-size: 1.6rem;
-            font-weight: 700;
-            color: #34d399;
-        }
-
-        .control-btns {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 12px;
-            margin-top: 20px;
-        }
-
-        .log-box {
-            background: rgba(0, 0, 0, 0.5);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 12px;
-            padding: 14px;
-            font-family: monospace;
-            font-size: 0.85rem;
-            max-height: 200px;
-            overflow-y: auto;
-            color: #a7f3d0;
-            white-space: pre-wrap;
-        }
-
-        .hidden { display: none; }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>⚡ NinePlus 服务端纯 Token 模式后台</h1>
-            <p>基于预生成 Token 的免登录云端中间件 (v2.5 - 原生 Epoch 时间戳解析修复)</p>
-            <div class="status-badge">
-                <span style="display:inline-block; width:8px; height:8px; background:#34d399; border-radius:50%;"></span>
-                纯 Token 模式激活 (永不挤掉官方 App)
-            </div>
+            <h1>⚡ NinePlus Platform Server</h1>
+            <p>纯 Token 持久化后端已运行</p>
         </header>
-
-        <!-- 管理员登录入口卡片 -->
-        <div class="card" id="adminLoginCard">
-            <h2>🔐 独立管理员控制台登录</h2>
-            <p style="color:var(--text-secondary); font-size:0.85rem; margin-bottom:16px;">
-                请输入管理员后台账号密码（默认账号：<b>admin</b>，默认密码：<b>admin123</b>）
-            </p>
-
-            <div class="form-group">
-                <label>管理员用户名</label>
-                <input type="text" id="adminUserInput" value="admin">
-            </div>
-            <div class="form-group">
-                <label>管理员密码</label>
-                <input type="password" id="adminPassInput" value="admin123">
-            </div>
-            <button class="btn" id="adminLoginBtn" onclick="doAdminLogin()">登录管理员后台</button>
-        </div>
-
-        <!-- 车辆数据展示卡片 (登录管理员后展示) -->
-        <div class="card hidden" id="dashboardCard">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
-                <h2 id="vehicleTitle">🛵 车辆数据加载中...</h2>
-                <button class="btn btn-secondary" style="width:auto; padding:6px 14px; font-size:0.85rem;" onclick="loadDashboard()">刷新数据</button>
-            </div>
-
-            <div class="metrics-grid">
-                <div class="metric-box">
-                    <div class="label">🔋 剩余电量 (SOC)</div>
-                    <div class="value" id="batteryValue">-- %</div>
-                </div>
-                <div class="metric-box">
-                    <div class="label">🛣️ 预估续航</div>
-                    <div class="value" id="rangeValue">-- km</div>
-                </div>
-                <div class="metric-box">
-                    <div class="label">🔒 车锁状态</div>
-                    <div class="value" id="lockStatusValue">--</div>
-                </div>
-                <div class="metric-box">
-                    <div class="label">🔌 充电状态</div>
-                    <div class="value" id="chargingValue">--</div>
-                </div>
-            </div>
-
-            <h3 style="font-size:1rem; margin-top:24px; margin-bottom:12px; color:var(--text-secondary);">🎮 远程指令测试</h3>
-            <div class="control-btns">
-                <button class="btn btn-secondary" onclick="triggerControl('bell')">🔔 远程响铃 (寻车)</button>
-                <button class="btn btn-secondary" onclick="triggerControl('buck')">📦 开启座桶/座舱</button>
-                <button class="btn" onclick="triggerControl('engine/start')">🔓 远程一键启动/解锁</button>
-                <button class="btn btn-danger" onclick="triggerControl('engine/stop')">🔒 远程一键熄火/关锁</button>
-            </div>
-        </div>
-
-        <!-- APP 连接配置指南 -->
-        <div class="card hidden" id="connectInfoCard">
-            <h2>📱 在 NinePlus iOS App 中填入以下地址：</h2>
-            <div class="form-group" style="margin-top:12px;">
-                <label>NinePlus server address (服务器地址)</label>
-                <input type="text" id="serverUrlInput" readonly onclick="this.select()">
-            </div>
-            <p style="color:var(--text-secondary); font-size:0.85rem;">
-                绑定账号：<b style="color:#34d399;">17740696165</b> | 在你的 iPhone 上打开 NinePlus App ➜ 设置页面 ➜ 粘贴上面的地址绑定即可！
-            </p>
-        </div>
-
-        <!-- 实时日志卡片 -->
-        <div class="card hidden" id="logCard">
-            <h2>📜 实时接口响应日志</h2>
-            <div class="log-box" id="logBox">等待操作...</div>
-        </div>
     </div>
-
-    <script>
-        let currentSN = "";
-
-        function appendLog(text, obj = null) {
-            const logBox = document.getElementById("logBox");
-            let msg = `[${new Date().toLocaleTimeString()}] ${text}`;
-            if (obj) {
-                msg += "\\n" + JSON.stringify(obj, null, 2);
-            }
-            logBox.innerText = msg + "\\n\\n" + logBox.innerText;
-        }
-
-        async function doAdminLogin() {
-            const username = document.getElementById("adminUserInput").value.trim();
-            const password = document.getElementById("adminPassInput").value.trim();
-
-            if (!username || !password) {
-                alert("请输入管理员用户名和密码");
-                return;
-            }
-
-            try {
-                const res = await fetch("/admin/login", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ username, password })
-                });
-                const data = await res.json();
-
-                if (!res.ok) {
-                    throw new Error(data.detail || "管理员认证失败");
-                }
-
-                appendLog("管理员独立登录成功！");
-                document.getElementById("adminLoginCard").classList.add("hidden");
-                document.getElementById("dashboardCard").classList.remove("hidden");
-                document.getElementById("connectInfoCard").classList.remove("hidden");
-                document.getElementById("logCard").classList.remove("hidden");
-                document.getElementById("serverUrlInput").value = window.location.origin;
-
-                await loadVehicles();
-            } catch (err) {
-                alert("管理员登录失败: " + err.message);
-            }
-        }
-
-        async function loadVehicles() {
-            appendLog("正在拉取车辆列表...");
-            try {
-                const res = await fetch("/vehicles");
-                const data = await res.json();
-                appendLog("车辆列表响应:", data);
-
-                const vehicles = data.vehicles || [];
-                if (vehicles.length > 0) {
-                    const firstVehicle = vehicles[0];
-                    currentSN = firstVehicle.sn || firstVehicle.wnumber || firstVehicle.vin || firstVehicle.id;
-                    const vName = firstVehicle.name || firstVehicle.ble_name || firstVehicle.device_name || '九号电动车';
-                    document.getElementById("vehicleTitle").innerText = `🛵 车辆: ${vName} (SN: ${currentSN})`;
-                    await loadDashboard();
-                } else {
-                    document.getElementById("vehicleTitle").innerText = "⚠️ 未查到的绑定车辆";
-                }
-            } catch (err) {
-                appendLog("拉取车辆列表失败: " + err.message);
-            }
-        }
-
-        async function loadDashboard() {
-            if (!currentSN) return;
-            appendLog(`正在拉取车辆 ${currentSN} 的仪表盘数据...`);
-            try {
-                const res = await fetch(`/vehicles/${currentSN}/dashboard`);
-                const data = await res.json();
-                appendLog("仪表盘完整响应数据:", data);
-
-                const battery = data.battery || {};
-                const travel = data.travel || {};
-                const prediction = data.prediction || {};
-                const status = data.status || data.state || {};
-
-                const soc = battery.soc ?? battery.batteryPercent ?? status.dump_energy ?? "--";
-                document.getElementById("batteryValue").innerText = `${soc} %`;
-
-                const estRange = prediction.range?.estimatedRange ?? travel.estimatedRange ?? status.precise_estimate_mileage ?? status.estimate_mileage ?? "--";
-                document.getElementById("rangeValue").innerText = `${estRange} km`;
-
-                const isLocked = status.isLocked === true || status.lock_status === 1;
-                document.getElementById("lockStatusValue").innerText = isLocked ? "🔒 已设防/上锁" : "🔓 已解锁";
-
-                const isCharging = battery.isCharging || status.charging === 1 || false;
-                document.getElementById("chargingValue").innerText = isCharging ? "⚡ 正在充电" : "🔋 未充电";
-            } catch (err) {
-                appendLog("拉取仪表盘失败: " + err.message);
-            }
-        }
-
-        async function triggerControl(action) {
-            if (!currentSN) {
-                alert("未选定车辆");
-                return;
-            }
-            if (!confirm(`确认要执行 [${action}] 控制指令吗？`)) return;
-
-            appendLog(`发送控制指令: /vehicles/${currentSN}/${action}`);
-            try {
-                const res = await fetch(`/vehicles/${currentSN}/${action}`, { method: "POST" });
-                const data = await res.json();
-                appendLog(`指令 [${action}] 响应:`, data);
-                alert("指令已发送成功！");
-                setTimeout(loadDashboard, 1500);
-            } catch (err) {
-                appendLog(`发送指令失败: ${err.message}`);
-                alert("发送指令失败: " + err.message);
-            }
-        }
-    </script>
 </body>
 </html>
 """
