@@ -333,7 +333,21 @@ def startup_event():
 @app.get("/healthz")
 def health_check():
     """Server health check endpoint required by NinePlus App."""
-    return {"status": "ok", "service": "NinePlus Platform Server (Pure Token Mode)", "version": "2.5.0", "active_account": "17740696165"}
+    active_account = "17740696165"
+    if sys.platform == "win32":
+        token_file = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "ninebot", "tokens.json")
+    else:
+        token_file = os.path.join(os.path.expanduser("~"), ".config", "ninebot", "tokens.json")
+        
+    if os.path.exists(token_file):
+        try:
+            with open(token_file, "r", encoding="utf-8") as f:
+                token_data = json.load(f)
+                active_account = token_data.get("phone", active_account)
+        except Exception:
+            pass
+
+    return {"status": "ok", "service": "NinePlus Platform Server (Pure Token Mode)", "version": "2.5.0", "active_account": active_account}
 
 
 @app.post("/admin/login")
