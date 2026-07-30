@@ -31,20 +31,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Pre-generated Token for Account 17740696165 (Valid through 2026/2027)
-DEFAULT_TOKEN_JSON = json.dumps({
-  "uuid": "1144394820840722432",
-  "username": "老官官",
-  "phone": "17740696165",
-  "region": "bj",
-  "areaCode": "86",
-  "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMTQ0Mzk0ODIwODQwNzIyNDMyIiwiYXVkaWVuY2UiOiJ1bmtub3duIiwidXNlcl9uYW1lIjoi6IC_5a6P5a6HIiwiY2xpZW50X2lkIjoidmVoaWNsZV9hcHBfcHJvZCIsInJlZ19kYXRlIjoxNjkyODg2NTg3LCJhdWQiOlsiaW90LXdlYmFwcCJdLCJhcmVhQ29kZSI6Ijg2IiwicGhvbmUiOiIxNzc0MDY5NjE2NSIsInNjb3BlIjpbInJlYWQiXSwiZXhwIjoxNzg3OTcwMDQ3LCJyZWdpb24iOiJiaiIsImp0aSI6IlVRT1hCQkFtV3RFcVBpaGh3YzNTWjBueG50byIsImVtYWlsIjpudWxsfQ.lSJ-U0EjRUAcCNgJiFHbZeIak41bFb4JobjVR1665uCYsR0y28oZtvboQLWWT4_dDK_IZslUlwIjQjIjh0w-ik8jbo41ikRWEVLnre6ydIY_ozK_3s86qeMM7oIt2A_tLjHKW4Sfyl55ayrHw4SZNxWbsCqsfhU8gXSQnGKwsPU",
-  "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMTQ0Mzk0ODIwODQwNzIyNDMyIiwiYXVkaWVuY2UiOiJ1bmtub3duIiwidXNlcl9uYW1lIjoi6IC_5a6P5a6HIiwiY2xpZW50X2lkIjoidmVoaWNsZV9hcHBfcHJvZCIsInJlZ19kYXRlIjoxNjkyODg2NTg3LCJhdWQiOlsiaW90LXdlYmFwcCJdLCJhcmVhQ29kZSI6Ijg2IiwicGhvbmUiOiIxNzc0MDY5NjE2NSIsInNjb3BlIjpbInJlYWQiXSwiYXRpIjoiVVFPWEJCQW1XdEVxUGloaHdjM3NaMG54bnRvIiwiZXhwIjoxODAwOTMwMDQ3LCJyZWdpb24iOiJiaiIsImp0aSI6InNOTVFGYzBCa09UR3lld0U5SlBDd3JsTlN1VSIsImVtYWlsIjpudWxsfQ.IR8Q4yWY17x3eR37SnGLkLc_oYiUU64p-XE3o58LBEc65gc-rvdF_QM8WzfjLEmRvDudfZObeXME8GV2d6luvE0Y5w7k9I-REhy79ylDnc_8x4Xq7NbXEIk3JP1V_BCFDs3e-jODlYTwlND_Q43LMEuvYUu7a8jMBO3FW_zV1vk",
-  "accessTokenValidity": "1787970047966",
-  "business_uid": "96665471",
-  "saved_at": 1785378048
-}, ensure_ascii=False)
-
+# Environment variable name for optional token injection (for docker/CI)
+# In production, users should run `ninecli login` to generate the token locally.
 
 def write_ninebot_tokens_to_disk(raw_json_str: str):
     """Write Ninebot token JSON to ninecli's persistent configuration path."""
@@ -115,11 +103,18 @@ def run_ninecli_json(args: List[str]) -> Any:
                 desc = match.group(1)
                 if desc.lower() not in ("success", "ok", "00000"):
                     logger.warning(f"ninecli returned error desc: {desc}")
+                    if any(keyword in desc.lower() for keyword in ["token", "login", "auth", "expire", "invalid", "unauthorized", "未登录", "失效", "过期"]):
+                        raise HTTPException(status_code=401, detail=f"九号账号授权已过期，请重新登录: {desc}")
                     raise HTTPException(status_code=400, detail=f"九号服务请求失败: {desc}")
 
         if result.returncode != 0:
             err_msg = stderr_str or stdout_str or f"exit code {result.returncode}"
             logger.error(f"ninecli process error: {err_msg}")
+            
+            # Catch common auth errors in raw output
+            if any(keyword in err_msg.lower() for keyword in ["401", "unauthorized", "token", "expire"]):
+                raise HTTPException(status_code=401, detail="九号账号授权已失效，请重新登录")
+                
             raise HTTPException(status_code=400, detail=f"九号服务请求失败: {err_msg}")
         
         if stdout_str:
@@ -326,8 +321,11 @@ class BatteryChemistryRequest(BaseModel):
 def startup_event():
     """Server startup hook: write token directly to ninecli config folder."""
     logger.info("Initializing NinePlus Token Server startup sequence...")
-    tokens_json = os.environ.get("NINEBOT_TOKENS_JSON", DEFAULT_TOKEN_JSON)
-    write_ninebot_tokens_to_disk(tokens_json)
+    tokens_json = os.environ.get("NINEBOT_TOKENS_JSON")
+    if tokens_json:
+        write_ninebot_tokens_to_disk(tokens_json)
+    else:
+        logger.info("No NINEBOT_TOKENS_JSON env var provided. Depending on existing ninecli tokens.json")
 
 
 # --- REST API Endpoints for NinePlus App & Independent Admin ---
@@ -343,6 +341,41 @@ def admin_login(req: AdminLoginRequest):
     """Independent Admin Portal Authentication Login."""
     if req.username == admin_store.admin_user and req.password == admin_store.admin_pass:
         return {"status": "ok", "message": "管理员登录成功", "token": "admin_session_valid"}
+    raise HTTPException(status_code=401, detail="管理员用户名或密码错误")
+
+
+@app.delete("/admin/token")
+def admin_delete_token(req: AdminLoginRequest):
+    """Securely delete the Ninebot token file (Admin only)."""
+    if req.username == admin_store.admin_user and req.password == admin_store.admin_pass:
+        if sys.platform == "win32":
+            token_file = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "ninebot", "tokens.json")
+        else:
+            token_file = os.path.join(os.path.expanduser("~"), ".config", "ninebot", "tokens.json")
+            
+        if os.path.exists(token_file):
+            os.remove(token_file)
+            return {"status": "ok", "message": "九号账号授权 (Token) 已安全清除"}
+        return {"status": "ok", "message": "服务端目前没有保存任何 Token"}
+    raise HTTPException(status_code=401, detail="管理员用户名或密码错误")
+
+
+@app.post("/admin/export-token")
+def admin_export_token(req: AdminLoginRequest):
+    """Securely export the current Ninebot token JSON string for Render Environment Variables."""
+    if req.username == admin_store.admin_user and req.password == admin_store.admin_pass:
+        if sys.platform == "win32":
+            token_file = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "ninebot", "tokens.json")
+        else:
+            token_file = os.path.join(os.path.expanduser("~"), ".config", "ninebot", "tokens.json")
+            
+        if os.path.exists(token_file):
+            try:
+                with open(token_file, "r", encoding="utf-8") as f:
+                    return {"status": "ok", "token_json_string": f.read()}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"无法读取 Token 文件: {e}")
+        return {"status": "error", "message": "目前没有保存在本地的 Token，请先登录。"}
     raise HTTPException(status_code=401, detail="管理员用户名或密码错误")
 
 
