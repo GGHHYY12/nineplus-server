@@ -574,6 +574,32 @@ def admin_export_token(req: AdminLoginRequest):
     raise HTTPException(status_code=401, detail="管理员用户名或密码错误")
 
 
+@app.post("/admin/debug/vehicles")
+def admin_debug_vehicles(req: AdminLoginRequest):
+    """Admin-only debug endpoint to inspect raw ninecli vehicle payload shape."""
+    if req.username != admin_store.admin_user or req.password != admin_store.admin_pass:
+        raise HTTPException(status_code=401, detail="管理员用户名或密码错误")
+
+    payload = run_ninecli_json(["vehicles"], cold_start_retries=0)
+    normalized = normalize_vehicle_list(payload)
+    summary = {
+        "payload_type": type(payload).__name__,
+        "normalized_vehicle_count": len(normalized),
+        "normalized_vehicle_sns": [item.get("sn") for item in normalized],
+    }
+    if isinstance(payload, dict):
+        summary["payload_keys"] = list(payload.keys())
+    elif isinstance(payload, list):
+        summary["payload_list_length"] = len(payload)
+        summary["payload_item_types"] = sorted({type(item).__name__ for item in payload})
+
+    return {
+        "status": "ok",
+        "summary": summary,
+        "payload": payload,
+    }
+
+
 @app.post("/accounts/login")
 def login(req: LoginRequest):
     """Account login endpoint using ninecli."""
