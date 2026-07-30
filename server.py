@@ -178,12 +178,12 @@ def get_epoch_timestamp(ts_val: Any, fmt_str: Any = None) -> Optional[int]:
     return None
 
 
-def format_china_date(ts_num: Optional[int], fallback: str = "2026-07-30 08:00:00") -> str:
-    """Format numeric epoch timestamp into Beijing Time string 'YYYY-MM-DD HH:mm:ss'."""
+def format_china_date(ts_num: Optional[int], fallback: str = "2026-07-30T08:00:00+08:00") -> str:
+    """Format numeric epoch timestamp into Beijing Time string ISO8601 'YYYY-MM-DDTHH:mm:ss+08:00'."""
     if ts_num and ts_num > 1e8:
         try:
             dt = datetime.datetime.fromtimestamp(ts_num, tz=BEIJING_TZ)
-            return dt.strftime("%Y-%m-%d %H:%M:%S")
+            return dt.strftime("%Y-%m-%dT%H:%M:%S+08:00")
         except (ValueError, TypeError, OverflowError):
             pass
     return fallback
@@ -243,8 +243,8 @@ def normalize_trip_record(raw_item: dict, index: int = 0) -> dict:
     start_ts = get_epoch_timestamp(raw_start, start_fmt) or 1785369922
     end_ts = get_epoch_timestamp(raw_end, end_fmt) or (start_ts + int(duration_sec or 900))
     
-    start_str = format_china_date(start_ts, "2026-07-30 08:05:22")
-    end_str = format_china_date(end_ts, "2026-07-30 08:22:07")
+    start_str = format_china_date(start_ts, "2026-07-30T08:05:22+08:00")
+    end_str = format_china_date(end_ts, "2026-07-30T08:22:07+08:00")
 
     speed_val = 0.0
     spd = raw_item.get("speed") or raw_item.get("avg_speed") or raw_item.get("max_speed")
