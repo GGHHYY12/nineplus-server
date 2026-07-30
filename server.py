@@ -31,8 +31,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Environment variable name for optional token injection (for docker/CI)
-# In production, users should run `ninecli login` to generate the token locally.
+# Pre-generated Token for Account 17740696165 (Valid through 2026/2027)
+DEFAULT_TOKEN_JSON = json.dumps({
+  "uuid": "1144394820840722432",
+  "username": "老官官",
+  "phone": "17740696165",
+  "region": "bj",
+  "areaCode": "86",
+  "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMTQ0Mzk0ODIwODQwNzIyNDMyIiwiYXVkaWVuY2UiOiJ1bmtub3duIiwidXNlcl9uYW1lIjoi6IC_5a6P5a6HIiwiY2xpZW50X2lkIjoidmVoaWNsZV9hcHBfcHJvZCIsInJlZ19kYXRlIjoxNjkyODg2NTg3LCJhdWQiOlsiaW90LXdlYmFwcCJdLCJhcmVhQ29kZSI6Ijg2IiwicGhvbmUiOiIxNzc0MDY5NjE2NSIsInNjb3BlIjpbInJlYWQiXSwiZXhwIjoxNzg3OTcwMDQ3LCJyZWdpb24iOiJiaiIsImp0aSI6IlVRT1hCQkFtV3RFcVBpaGh3YzNTWjBueG50byIsImVtYWlsIjpudWxsfQ.lSJ-U0EjRUAcCNgJiFHbZeIak41bFb4JobjVR1665uCYsR0y28oZtvboQLWWT4_dDK_IZslUlwIjQjIjh0w-ik8jbo41ikRWEVLnre6ydIY_ozK_3s86qeMM7oIt2A_tLjHKW4Sfyl55ayrHw4SZNxWbsCqsfhU8gXSQnGKwsPU",
+  "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMTQ0Mzk0ODIwODQwNzIyNDMyIiwiYXVkaWVuY2UiOiJ1bmtub3duIiwidXNlcl9uYW1lIjoi6IC_5a6P5a6HIiwiY2xpZW50X2lkIjoidmVoaWNsZV9hcHBfcHJvZCIsInJlZ19kYXRlIjoxNjkyODg2NTg3LCJhdWQiOlsiaW90LXdlYmFwcCJdLCJhcmVhQ29kZSI6Ijg2IiwicGhvbmUiOiIxNzc0MDY5NjE2NSIsInNjb3BlIjpbInJlYWQiXSwiYXRpIjoiVVFPWEJCQW1XdEVxUGloaHdjM3NaMG54bnRvIiwiZXhwIjoxODAwOTMwMDQ3LCJyZWdpb24iOiJiaiIsImp0aSI6InNOTVFGYzBCa09UR3lld0U5SlBDd3JsTlN1VSIsImVtYWlsIjpudWxsfQ.IR8Q4yWY17x3eR37SnGLkLc_oYiUU64p-XE3o58LBEc65gc-rvdF_QM8WzfjLEmRvDudfZObeXME8GV2d6luvE0Y5w7k9I-REhy79ylDnc_8x4Xq7NbXEIk3JP1V_BCFDs3e-jODlYTwlND_Q43LMEuvYUu7a8jMBO3FW_zV1vk",
+  "accessTokenValidity": "1787970047966",
+  "business_uid": "96665471",
+  "saved_at": 1785378048
+}, ensure_ascii=False)
 
 def write_ninebot_tokens_to_disk(raw_json_str: str):
     """Write Ninebot token JSON to ninecli's persistent configuration path."""
@@ -320,11 +331,8 @@ class BatteryChemistryRequest(BaseModel):
 def startup_event():
     """Server startup hook: write token directly to ninecli config folder."""
     logger.info("Initializing NinePlus Token Server startup sequence...")
-    tokens_json = os.environ.get("NINEBOT_TOKENS_JSON")
-    if tokens_json:
-        write_ninebot_tokens_to_disk(tokens_json)
-    else:
-        logger.info("No NINEBOT_TOKENS_JSON env var provided. Depending on existing ninecli tokens.json")
+    tokens_json = os.environ.get("NINEBOT_TOKENS_JSON", DEFAULT_TOKEN_JSON)
+    write_ninebot_tokens_to_disk(tokens_json)
 
 
 # --- REST API Endpoints for NinePlus App & Independent Admin ---
