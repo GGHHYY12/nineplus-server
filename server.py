@@ -4,9 +4,12 @@ import json
 import logging
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -211,6 +214,238 @@ def run_ninecli_json(
                 raise e
             logger.error(f"ninecli Subprocess error: {e}")
             raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")
+
+
+def run_ninecli_raw(args: List[str], *, timeout_seconds: int = 30, include_json_flag: bool = True) -> Dict[str, Any]:
+    cmd = ["ninecli"] + args
+    if include_json_flag and "--json" not in args:
+        cmd.append("--json")
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout_seconds,
+    )
+    stdout_str = (result.stdout or "").strip()
+    stderr_str = (result.stderr or "").strip()
+    payload = None
+    if stdout_str:
+        try:
+            payload = json.loads(stdout_str)
+        except json.JSONDecodeError:
+            payload = stdout_str
+
+    return {
+        "command": cmd,
+        "returncode": result.returncode,
+        "stdout": stdout_str,
+        "stderr": stderr_str,
+        "payload": payload,
+    }
+
+
+def text_indicates_auth_issue(text: Any) -> bool:
+    if text is None:
+        return False
+    lowered = str(text).lower()
+    keywords = [
+        "401901",
+        "401",
+        "unauthorized",
+        "token",
+        "expire",
+        "expired",
+        "invalid signature",
+        "invalid jwt",
+        "not logged in",
+        "need login",
+        "未登录",
+        "失效",
+        "过期",
+    ]
+    return any(keyword in lowered for keyword in keywords)
+
+
+def payload_indicates_auth_issue(payload: Any) -> bool:
+    if isinstance(payload, dict):
+        for key in ("resultDesc", "message", "detail", "data", "code", "resultCode"):
+            if text_indicates_auth_issue(payload.get(key)):
+                return True
+
+        error_payload = payload.get("error")
+        if isinstance(error_payload, dict):
+            if text_indicates_auth_issue(error_payload.get("message")):
+                return True
+            if text_indicates_auth_issue(error_payload.get("code")):
+                return True
+            if str(error_payload.get("upstream_code") or "") == "401901":
+                return True
+
+    if isinstance(payload, str):
+        return text_indicates_auth_issue(payload)
+
+    return False
+
+
+def find_free_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def request_ninecli_proxy(method: str, path: str, body: Optional[dict] = None) -> Dict[str, Any]:
+    """
+    Boot a short-lived `ninecli serve` instance so we can use its richer auth/refresh
+    endpoints when the direct CLI hides upstream auth failures behind an empty list.
+    """
+    port = find_free_loopback_port()
+    bind_addr = f"127.0.0.1:{port}"
+    cmd = ["ninecli", "serve", "--bind", bind_addr, "--quiet"]
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    try:
+        health_url = f"http://{bind_addr}/healthz"
+        last_error = None
+        for _ in range(40):
+            if proc.poll() is not None:
+                break
+            try:
+                with urllib.request.urlopen(health_url, timeout=1.0) as resp:
+                    if resp.status == 200:
+                        last_error = None
+                        break
+            except Exception as exc:
+                last_error = exc
+                time.sleep(0.25)
+        else:
+            raise RuntimeError(f"ninecli serve startup timed out: {last_error}")
+
+        if proc.poll() is not None:
+            raise RuntimeError("ninecli serve exited before becoming healthy")
+
+        request_body = None
+        headers = {}
+        if body is not None:
+            request_body = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+
+        req = urllib.request.Request(
+            f"http://{bind_addr}{path}",
+            data=request_body,
+            headers=headers,
+            method=method.upper(),
+        )
+
+        http_status = None
+        raw_text = ""
+        try:
+            with urllib.request.urlopen(req, timeout=20.0) as resp:
+                http_status = resp.status
+                raw_text = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            http_status = exc.code
+            raw_text = exc.read().decode("utf-8", errors="replace")
+
+        try:
+            payload = json.loads(raw_text) if raw_text else None
+        except json.JSONDecodeError:
+            payload = raw_text
+
+        return {
+            "ok": isinstance(payload, dict) and payload.get("ok") is True,
+            "http_status": http_status,
+            "payload": payload,
+            "raw": raw_text,
+        }
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+
+
+def attempt_ninebot_token_refresh() -> Dict[str, Any]:
+    try:
+        response = request_ninecli_proxy("POST", "/auth/refresh", {})
+    except Exception as exc:
+        logger.warning(f"ninecli auth refresh probe failed: {exc}")
+        return {"ok": False, "detail": f"refresh_probe_failed: {exc}"}
+
+    payload = response.get("payload")
+    if isinstance(payload, dict):
+        error_payload = payload.get("error")
+        if isinstance(error_payload, dict):
+            return {
+                "ok": False,
+                "detail": error_payload.get("message") or payload.get("raw") or "refresh_failed",
+                "upstream_code": error_payload.get("upstream_code"),
+                "http_status": response.get("http_status"),
+            }
+
+    return {
+        "ok": response.get("ok", False),
+        "detail": payload,
+        "http_status": response.get("http_status"),
+    }
+
+
+def diagnose_vehicle_auth_state() -> Dict[str, Any]:
+    whoami_probe: Dict[str, Any]
+    try:
+        whoami_probe = run_ninecli_raw(["whoami"])
+    except Exception as exc:
+        whoami_probe = {
+            "returncode": -1,
+            "stdout": "",
+            "stderr": str(exc),
+            "payload": None,
+        }
+
+    vehicle_proxy_probe: Dict[str, Any]
+    try:
+        vehicle_proxy_probe = request_ninecli_proxy("GET", "/vehicles")
+    except Exception as exc:
+        vehicle_proxy_probe = {"ok": False, "detail": f"vehicle_proxy_probe_failed: {exc}"}
+
+    proxy_payload = vehicle_proxy_probe.get("payload") if isinstance(vehicle_proxy_probe, dict) else None
+    upstream_code = None
+    if isinstance(proxy_payload, dict):
+        error_payload = proxy_payload.get("error")
+        if isinstance(error_payload, dict):
+            upstream_code = error_payload.get("upstream_code")
+
+    auth_issue_detected = (
+        payload_indicates_auth_issue(whoami_probe.get("payload"))
+        or text_indicates_auth_issue(whoami_probe.get("stderr"))
+        or payload_indicates_auth_issue(proxy_payload)
+        or str(upstream_code or "") == "401901"
+    )
+
+    return {
+        "auth_issue_detected": auth_issue_detected,
+        "whoami": {
+            "returncode": whoami_probe.get("returncode"),
+            "stderr": whoami_probe.get("stderr"),
+            "payload": whoami_probe.get("payload"),
+        },
+        "vehicle_proxy": {
+            "ok": vehicle_proxy_probe.get("ok"),
+            "http_status": vehicle_proxy_probe.get("http_status"),
+            "payload": proxy_payload,
+            "upstream_code": upstream_code,
+        },
+    }
 
 
 def extract_vehicle_items(payload: Any) -> List[dict]:
@@ -626,12 +861,15 @@ def admin_debug_vehicles(req: AdminLoginRequest):
 
     payload = run_ninecli_json(["vehicles"], cold_start_retries=0)
     normalized = normalize_vehicle_list(payload)
+    auth_diagnosis = diagnose_vehicle_auth_state()
+    refresh_probe = attempt_ninebot_token_refresh() if auth_diagnosis.get("auth_issue_detected") else {"ok": False, "detail": "skipped"}
     summary = {
         "payload_type": type(payload).__name__,
         "normalized_vehicle_count": len(normalized),
         "normalized_vehicle_sns": [item.get("sn") for item in normalized],
         "tokens_file_exists": os.path.exists(os.path.join(NINEBOT_CONFIG_DIR, "tokens.json")),
         "config_file_exists": os.path.exists(NINEBOT_RUNTIME_CONFIG_FILE),
+        "auth_issue_detected": auth_diagnosis.get("auth_issue_detected"),
     }
     if isinstance(payload, dict):
         summary["payload_keys"] = list(payload.keys())
@@ -647,6 +885,8 @@ def admin_debug_vehicles(req: AdminLoginRequest):
         "status": "ok",
         "summary": summary,
         "payload": payload,
+        "auth_diagnosis": auth_diagnosis,
+        "refresh_probe": refresh_probe,
     }
 
 
@@ -676,6 +916,30 @@ def get_vehicles():
         logger.warning(f"Vehicles payload had no usable vehicles; keys={list(payload.keys())}")
     else:
         logger.warning(f"Vehicles payload had no usable vehicles; type={type(payload).__name__}")
+
+    auth_diagnosis = diagnose_vehicle_auth_state()
+    if auth_diagnosis.get("auth_issue_detected"):
+        logger.warning(f"Vehicle auth diagnosis detected auth issue: {auth_diagnosis}")
+        refresh_probe = attempt_ninebot_token_refresh()
+        if refresh_probe.get("ok"):
+            logger.info("Ninebot token refresh succeeded; retrying vehicles fetch once")
+            retry_payload = run_ninecli_json(["vehicles"], cold_start_retries=2, retry_delay_seconds=1.0)
+            retry_vehicles = normalize_vehicle_list(retry_payload)
+            if retry_vehicles:
+                save_cached_vehicles(retry_vehicles)
+                return {"vehicles": retry_vehicles, "source": "refreshed_token"}
+
+        cached_vehicles = load_cached_vehicles()
+        if cached_vehicles:
+            logger.warning("Serving cached vehicle list because Ninebot auth is stale")
+            return {
+                "vehicles": cached_vehicles,
+                "stale": True,
+                "source": "vehicle_cache",
+                "auth_expired": True,
+            }
+
+        raise HTTPException(status_code=401, detail="九号账号授权已过期，请重新登录九号账号")
 
     cached_vehicles = load_cached_vehicles()
     if cached_vehicles:
