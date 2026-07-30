@@ -128,7 +128,11 @@ def run_ninecli_json(args: List[str]) -> Any:
             except json.JSONDecodeError:
                 return {"raw": stdout_str, "status": "ok"}
         
-        return {"status": "ok", "message": stderr_str or "操作成功"}
+        if stderr_str:
+            logger.error(f"ninecli returned empty stdout but has stderr: {stderr_str}")
+            raise HTTPException(status_code=502, detail=f"九号服务异常: {stderr_str}")
+            
+        return {"status": "ok", "message": "操作成功"}
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="请求九号服务器超时，请检查网络重试")
     except Exception as e:
