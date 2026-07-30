@@ -18,7 +18,7 @@ logger = logging.getLogger("nineplus_server")
 app = FastAPI(
     title="NinePlus Platform Server",
     description="Standalone Ninebot EV Server powered by ninecli & FastAPI",
-    version="1.2.0",
+    version="1.3.0",
 )
 
 # Enable CORS for browser access
@@ -30,17 +30,59 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Shared Session Cache
-class NinebotSessionCache:
+# Persistent Session & Credential Store File
+SESSION_FILE = os.path.join(os.path.expanduser("~"), ".nineplus_session.json")
+
+class NinebotSessionStore:
     def __init__(self):
+        self.account: Optional[str] = None
+        self.password: Optional[str] = None
         self.session_token: Optional[str] = None
-        self.user_account: Optional[str] = None
+        self.load()
 
-session_cache = NinebotSessionCache()
+    def load(self):
+        if os.path.exists(SESSION_FILE):
+            try:
+                with open(SESSION_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.account = data.get("account")
+                    self.password = data.get("password")
+                    self.session_token = data.get("session_token")
+                    logger.info(f"Loaded persistent session for account: {self.account}")
+            except Exception as e:
+                logger.warning(f"Failed to load persistent session file: {e}")
+
+    def save(self, account: str, password: str, session_token: Optional[str] = None):
+        self.account = account
+        self.password = password
+        self.session_token = session_token or "active"
+        try:
+            with open(SESSION_FILE, "w", encoding="utf-8") as f:
+                json.dump({
+                    "account": self.account,
+                    "password": self.password,
+                    "session_token": self.session_token
+                }, f, ensure_ascii=False, indent=2)
+            logger.info(f"Saved persistent session for account: {self.account}")
+        except Exception as e:
+            logger.warning(f"Failed to save persistent session file: {e}")
+
+session_store = NinebotSessionStore()
 
 
-def run_ninecli_json(args: List[str]) -> Any:
-    """Execute ninecli CLI binary safely and parse JSON or status output."""
+def auto_reauth_if_needed():
+    """Silently re-authenticate ninecli using saved credentials if session expired."""
+    if session_store.account and session_store.password:
+        logger.info(f"Triggering silent auto-reauth for account: {session_store.account}")
+        try:
+            cmd = ["ninecli", "login", "-u", session_store.account, "-p", session_store.password, "--json"]
+            subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=20)
+        except Exception as e:
+            logger.warning(f"Silent auto-reauth failed: {e}")
+
+
+def run_ninecli_json(args: List[str], retry_on_auth_fail: Bool = True) -> Any:
+    """Execute ninecli CLI binary safely, with automatic re-auth on token expiration."""
     cmd = ["ninecli"] + args
     if "--json" not in args:
         cmd.append("--json")
@@ -54,14 +96,26 @@ def run_ninecli_json(args: List[str]) -> Any:
         
         logger.info(f"ninecli returncode: {result.returncode}, stdout len: {len(stdout_str)}, stderr: {repr(stderr_str)}")
         
-        # Check stderr for resultDesc error messages (e.g. account not exists, password error)
+        # Detect token/session expiration error messages
+        is_auth_error = ("unauthorized" in stderr_str.lower() or 
+                         "not login" in stderr_str.lower() or 
+                         "token expired" in stderr_str.lower() or
+                         "resultDesc=\"login" in stderr_str.lower() or
+                         "resultDesc=\"token" in stderr_str.lower())
+
+        if is_auth_error and retry_on_auth_fail and session_store.account:
+            logger.warning("Detected session expiration, attempting silent auto-reauth...")
+            auto_reauth_if_needed()
+            # Retry original command once
+            return run_ninecli_json(args, retry_on_auth_fail=False)
+
         if "resultDesc=" in stderr_str:
             match = re.search(r'resultDesc="([^"]+)"', stderr_str)
             if match:
                 desc = match.group(1)
                 if desc.lower() not in ("success", "ok", "00000"):
                     logger.warning(f"ninecli returned error desc: {desc}")
-                    raise HTTPException(status_code=400, detail=f"九号服务登录失败: {desc}")
+                    raise HTTPException(status_code=400, detail=f"九号服务请求失败: {desc}")
 
         if result.returncode != 0:
             err_msg = stderr_str or stdout_str or f"exit code {result.returncode}"
@@ -110,26 +164,35 @@ class BatteryChemistryRequest(BaseModel):
     capacity_wh: Optional[str] = None
 
 
+@app.on_event("startup")
+def startup_event():
+    """Server startup hook: automatically re-authenticate if saved credentials exist."""
+    logger.info("Initializing NinePlus Server startup sequence...")
+    if session_store.account and session_store.password:
+        logger.info(f"Found saved session for account {session_store.account}, performing background warmup...")
+        auto_reauth_if_needed()
+
+
 # --- REST API Endpoints for NinePlus App ---
 
 @app.get("/healthz")
 def health_check():
     """Server health check endpoint required by NinePlus App."""
-    return {"status": "ok", "service": "NinePlus Platform Server", "version": "1.2.0"}
+    return {"status": "ok", "service": "NinePlus Platform Server", "version": "1.3.0", "active_account": session_store.account}
 
 
 @app.post("/accounts/login")
 def login(req: LoginRequest):
-    """Account login endpoint using ninecli."""
+    """Account login endpoint using ninecli with persistent session storage."""
     logger.info(f"Login request for account: {req.account}")
     payload = run_ninecli_json(["login", "-u", req.account, "-p", req.password])
     
-    session_cache.user_account = req.account
+    token = "ninecli_session_active"
     if isinstance(payload, dict):
-        token = payload.get("sessionToken") or payload.get("session_token") or payload.get("token") or "ninecli_session_active"
-        session_cache.session_token = str(token)
-            
-    return {"status": "ok", "account": req.account, "sessionToken": session_cache.session_token, "details": payload}
+        token = str(payload.get("sessionToken") or payload.get("session_token") or payload.get("token") or "ninecli_session_active")
+        
+    session_store.save(account=req.account, password=req.password, session_token=token)
+    return {"status": "ok", "account": req.account, "sessionToken": session_store.session_token, "details": payload}
 
 
 @app.get("/vehicles")
@@ -577,7 +640,7 @@ HTML_UI = """
     <div class="container">
         <header>
             <h1>⚡ NinePlus 服务端控制台 & 车辆调试工具</h1>
-            <p>基于 ninecli 逆向引擎的九号电动车独立 API 中间件 (v1.2)</p>
+            <p>基于 ninecli 逆向引擎的九号电动车独立 API 中间件 (v1.3 - 自动静默持久化)</p>
             <div class="status-badge">
                 <span style="display:inline-block; width:8px; height:8px; background:#34d399; border-radius:50%;"></span>
                 ninecli 引擎就绪 (Ready)
@@ -588,7 +651,7 @@ HTML_UI = """
         <div class="card" id="loginCard">
             <h2>🔑 登录九号账号</h2>
             <p style="color:var(--text-secondary); font-size:0.85rem; margin-bottom:16px;">
-                输入你的九号 App 绑定的手机号和密码（使用 ninecli 引擎安全认证）
+                输入你的九号 App 绑定的手机号和密码（使用 ninecli 引擎安全认证，支持自动持久化与无感恢复）
             </p>
 
             <div class="form-group">
