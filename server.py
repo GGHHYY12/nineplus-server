@@ -23,6 +23,7 @@ else:
     NINEBOT_CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "ninebot")
 
 VEHICLE_CACHE_FILE = os.path.join(NINEBOT_CONFIG_DIR, "vehicles_cache.json")
+NINEBOT_RUNTIME_CONFIG_FILE = os.path.join(NINEBOT_CONFIG_DIR, "config.json")
 
 app = FastAPI(
     title="NinePlus Platform Server",
@@ -59,6 +60,28 @@ def read_ninebot_tokens_from_disk() -> Optional[dict]:
     if os.path.exists(token_file):
         try:
             with open(token_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return None
+
+
+def write_ninebot_runtime_config_to_disk(raw_json_str: str):
+    """Write ninecli runtime config.json if provided."""
+    os.makedirs(NINEBOT_CONFIG_DIR, exist_ok=True)
+    try:
+        parsed = json.loads(raw_json_str)
+        with open(NINEBOT_RUNTIME_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(parsed, f, ensure_ascii=False, indent=2)
+        logger.info(f"Successfully saved ninecli runtime config to {NINEBOT_RUNTIME_CONFIG_FILE}")
+    except Exception as e:
+        logger.warning(f"Failed to save ninecli runtime config: {e}")
+
+
+def read_ninebot_runtime_config_from_disk() -> Optional[dict]:
+    if os.path.exists(NINEBOT_RUNTIME_CONFIG_FILE):
+        try:
+            with open(NINEBOT_RUNTIME_CONFIG_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             pass
@@ -518,6 +541,12 @@ def startup_event():
         write_ninebot_tokens_to_disk(tokens_json)
     else:
         logger.info("No NINEBOT_TOKENS_JSON env var provided. Depending on existing ninecli tokens.json")
+
+    runtime_config_json = os.environ.get("NINEBOT_CONFIG_JSON")
+    if runtime_config_json:
+        write_ninebot_runtime_config_to_disk(runtime_config_json)
+    else:
+        logger.info("No NINEBOT_CONFIG_JSON env var provided. Depending on existing ninecli config.json")
     warm_vehicle_cache()
 
 
@@ -574,6 +603,21 @@ def admin_export_token(req: AdminLoginRequest):
     raise HTTPException(status_code=401, detail="管理员用户名或密码错误")
 
 
+@app.post("/admin/export-config")
+def admin_export_config(req: AdminLoginRequest):
+    """Export the current ninecli config.json for Render persistence."""
+    if req.username != admin_store.admin_user or req.password != admin_store.admin_pass:
+        raise HTTPException(status_code=401, detail="管理员用户名或密码错误")
+
+    config_data = read_ninebot_runtime_config_from_disk()
+    if config_data is None:
+        return {"status": "error", "message": "目前没有保存在本地的 config.json。"}
+    return {
+        "status": "ok",
+        "config_json_string": json.dumps(config_data, ensure_ascii=False)
+    }
+
+
 @app.post("/admin/debug/vehicles")
 def admin_debug_vehicles(req: AdminLoginRequest):
     """Admin-only debug endpoint to inspect raw ninecli vehicle payload shape."""
@@ -586,12 +630,18 @@ def admin_debug_vehicles(req: AdminLoginRequest):
         "payload_type": type(payload).__name__,
         "normalized_vehicle_count": len(normalized),
         "normalized_vehicle_sns": [item.get("sn") for item in normalized],
+        "tokens_file_exists": os.path.exists(os.path.join(NINEBOT_CONFIG_DIR, "tokens.json")),
+        "config_file_exists": os.path.exists(NINEBOT_RUNTIME_CONFIG_FILE),
     }
     if isinstance(payload, dict):
         summary["payload_keys"] = list(payload.keys())
     elif isinstance(payload, list):
         summary["payload_list_length"] = len(payload)
         summary["payload_item_types"] = sorted({type(item).__name__ for item in payload})
+
+    config_data = read_ninebot_runtime_config_from_disk()
+    if isinstance(config_data, dict):
+        summary["config_keys"] = list(config_data.keys())
 
     return {
         "status": "ok",
