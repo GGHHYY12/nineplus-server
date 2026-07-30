@@ -19,7 +19,7 @@ logger = logging.getLogger("nineplus_server")
 app = FastAPI(
     title="NinePlus Platform Server",
     description="Standalone Ninebot EV Server powered by ninecli & Token Auth Middleware",
-    version="2.4.0",
+    version="2.5.0",
 )
 
 # Enable CORS for browser access
@@ -155,38 +155,52 @@ def normalize_vehicle(v: dict) -> dict:
 
 BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 
-def format_china_date(ts_val: Any, fmt_str: Any = None) -> str:
-    """
-    Convert timestamp or date string to Beijing Time (UTC+8) 'YYYY-MM-DD HH:mm:ss'.
-    Ensures start_time & end_time are perfectly synchronized in local timezone to prevent Swift duration mismatch.
-    """
-    if ts_val:
+def get_epoch_timestamp(ts_val: Any, fmt_str: Any = None) -> Optional[int]:
+    """Extract numeric epoch timestamp in seconds."""
+    if ts_val is not None:
         try:
-            ts_num = float(ts_val)
-            if ts_num > 1e11:
-                ts_num /= 1000.0
+            val = float(ts_val)
+            if val > 1e11:
+                val /= 1000.0
+            if val > 1e8:
+                return int(val)
+        except (ValueError, TypeError, OverflowError):
+            pass
+
+    if fmt_str and isinstance(fmt_str, str):
+        try:
+            clean = fmt_str.strip().replace("T", " ").replace("Z", "")[:19]
+            dt = datetime.datetime.strptime(clean, "%Y-%m-%d %H:%M:%S").replace(tzinfo=BEIJING_TZ)
+            return int(dt.timestamp())
+        except (ValueError, TypeError):
+            pass
+
+    return None
+
+
+def format_china_date(ts_num: Optional[int], fallback: str = "2026-07-30 08:00:00") -> str:
+    """Format numeric epoch timestamp into Beijing Time string 'YYYY-MM-DD HH:mm:ss'."""
+    if ts_num and ts_num > 1e8:
+        try:
             dt = datetime.datetime.fromtimestamp(ts_num, tz=BEIJING_TZ)
             return dt.strftime("%Y-%m-%d %H:%M:%S")
         except (ValueError, TypeError, OverflowError):
             pass
-            
-    if fmt_str and isinstance(fmt_str, str):
-        clean = fmt_str.strip().replace("T", " ").replace("Z", "")
-        return clean[:19]
-
-    return "2026-07-30 08:00:00"
+    return fallback
 
 
 def normalize_trip_record(raw_item: dict, index: int = 0) -> dict:
     """
     Normalize Ninebot raw trip record from ninecli.
     Provides ALL field aliases expected by NinePlus iOS App in both Swift & JSON decoders.
-    Synchronizes start/end timestamps into Beijing Time to prevent saneDuration calculation drops.
+    Passes integer epoch timestamps for start_time & end_time so Swift's epochDateValue
+    parses timestamps with 100% precision.
     """
     t_id = str(raw_item.get("travel_id") or raw_item.get("id") or raw_item.get("ride_id") or f"ride_{index}")
     
     mileage_val = 0.0
-    for key in ["mileages", "mileage", "distance", "mileage_km", "day_total_mileage"]:
+    # Prioritize specific ride mileage keys over day_total_mileage
+    for key in ["mileages", "mileage", "distance", "mileage_km"]:
         v = raw_item.get(key)
         if v is not None:
             try:
@@ -196,6 +210,18 @@ def normalize_trip_record(raw_item: dict, index: int = 0) -> dict:
                     break
             except (ValueError, TypeError):
                 pass
+
+    if mileage_val <= 0:
+        for key in ["day_total_mileage", "dayTotalMileage"]:
+            v = raw_item.get(key)
+            if v is not None:
+                try:
+                    val = float(str(v).strip())
+                    if val > 0:
+                        mileage_val = val
+                        break
+                except (ValueError, TypeError):
+                    pass
                 
     duration_sec = 0.0
     dur = raw_item.get("duration") or raw_item.get("duration_seconds")
@@ -209,13 +235,16 @@ def normalize_trip_record(raw_item: dict, index: int = 0) -> dict:
     if duration_min <= 0:
         duration_min = float(raw_item.get("duration_minutes") or raw_item.get("durationMinutes") or 15.0)
 
-    start_ts = raw_item.get("start_time") or raw_item.get("started_at")
-    end_ts = raw_item.get("end_time") or raw_item.get("ended_at")
+    raw_start = raw_item.get("start_time") or raw_item.get("started_at")
+    raw_end = raw_item.get("end_time") or raw_item.get("ended_at")
     start_fmt = raw_item.get("start_time_format")
     end_fmt = raw_item.get("end_time_format")
     
-    start_str = format_china_date(start_ts, start_fmt)
-    end_str = format_china_date(end_ts, end_fmt)
+    start_ts = get_epoch_timestamp(raw_start, start_fmt) or 1785369922
+    end_ts = get_epoch_timestamp(raw_end, end_fmt) or (start_ts + int(duration_sec or 900))
+    
+    start_str = format_china_date(start_ts, "2026-07-30 08:05:22")
+    end_str = format_china_date(end_ts, "2026-07-30 08:22:07")
 
     speed_val = 0.0
     spd = raw_item.get("speed") or raw_item.get("avg_speed") or raw_item.get("max_speed")
@@ -253,12 +282,16 @@ def normalize_trip_record(raw_item: dict, index: int = 0) -> dict:
         "avgSpeed": speed_val,
         "average_speed": speed_val,
         "averageSpeed": speed_val,
-        "start_time": start_str,
-        "startTime": start_str,
+        "start_time": start_ts,
+        "startTime": start_ts,
+        "begin_time": start_ts,
+        "beginTime": start_ts,
         "started_at": start_str,
         "startedAt": start_str,
-        "end_time": end_str,
-        "endTime": end_str,
+        "end_time": end_ts,
+        "endTime": end_ts,
+        "stop_time": end_ts,
+        "stopTime": end_ts,
         "ended_at": end_str,
         "endedAt": end_str,
         "used_electricity": energy_val,
@@ -298,7 +331,7 @@ def startup_event():
 @app.get("/healthz")
 def health_check():
     """Server health check endpoint required by NinePlus App."""
-    return {"status": "ok", "service": "NinePlus Platform Server (Pure Token Mode)", "version": "2.4.0", "active_account": "17740696165"}
+    return {"status": "ok", "service": "NinePlus Platform Server (Pure Token Mode)", "version": "2.5.0", "active_account": "17740696165"}
 
 
 @app.post("/admin/login")
@@ -842,7 +875,7 @@ HTML_UI = """
     <div class="container">
         <header>
             <h1>⚡ NinePlus 服务端纯 Token 模式后台</h1>
-            <p>基于预生成 Token 的免登录云端中间件 (v2.4 - 时区同步修复)</p>
+            <p>基于预生成 Token 的免登录云端中间件 (v2.5 - 原生 Epoch 时间戳解析修复)</p>
             <div class="status-badge">
                 <span style="display:inline-block; width:8px; height:8px; background:#34d399; border-radius:50%;"></span>
                 纯 Token 模式激活 (永不挤掉官方 App)
