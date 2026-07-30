@@ -18,7 +18,7 @@ logger = logging.getLogger("nineplus_server")
 app = FastAPI(
     title="NinePlus Platform Server",
     description="Standalone Ninebot EV Server powered by ninecli & FastAPI",
-    version="1.6.0",
+    version="1.7.0",
 )
 
 # Enable CORS for browser access
@@ -42,6 +42,17 @@ class NinebotSessionStore:
         self.load()
 
     def load(self):
+        # Priority 1: Check Environment Variables (Permanent across Docker rebuilds)
+        env_acc = os.environ.get("NINEBOT_ACCOUNT")
+        env_pwd = os.environ.get("NINEBOT_PASSWORD")
+        if env_acc and env_pwd:
+            self.account = env_acc.strip()
+            self.password = env_pwd.strip()
+            self.session_token = "env_active"
+            logger.info(f"Loaded permanent Ninebot session from Environment Variables for account: {self.account}")
+            return
+
+        # Priority 2: Check Local Ephemeral Disk File
         if os.path.exists(SESSION_FILE):
             try:
                 with open(SESSION_FILE, "r", encoding="utf-8") as f:
@@ -49,7 +60,7 @@ class NinebotSessionStore:
                     self.account = data.get("account")
                     self.password = data.get("password")
                     self.session_token = data.get("session_token")
-                    logger.info(f"Loaded persistent session for account: {self.account}")
+                    logger.info(f"Loaded persistent session from disk for account: {self.account}")
             except Exception as e:
                 logger.warning(f"Failed to load persistent session file: {e}")
 
@@ -227,7 +238,7 @@ def startup_event():
 @app.get("/healthz")
 def health_check():
     """Server health check endpoint required by NinePlus App."""
-    return {"status": "ok", "service": "NinePlus Platform Server", "version": "1.6.0", "active_account": session_store.account}
+    return {"status": "ok", "service": "NinePlus Platform Server", "version": "1.7.0", "active_account": session_store.account}
 
 
 @app.post("/admin/login")
@@ -768,7 +779,7 @@ HTML_UI = """
     <div class="container">
         <header>
             <h1>⚡ NinePlus 服务端独立管理后台</h1>
-            <p>私有云端中间件后台控制台 (v1.6)</p>
+            <p>私有云端中间件后台控制台 (v1.7 - 云端永久环境变量打卡)</p>
             <div class="status-badge">
                 <span style="display:inline-block; width:8px; height:8px; background:#34d399; border-radius:50%;"></span>
                 独立管理员系统 (Admin Portal Active)
@@ -832,7 +843,7 @@ HTML_UI = """
         <div class="card hidden" id="ninebotBindCard">
             <h2>🔑 九号账号绑定管理</h2>
             <p style="color:var(--text-secondary); font-size:0.85rem; margin-bottom:12px;">
-                当前后台打卡绑定账号：<b id="activeAccountText" style="color:#34d399;">未绑定</b>（平时仅纯查询，绝对不会重复登录挤掉官方 App）
+                当前后台打卡绑定账号：<b id="activeAccountText" style="color:#34d399;">未绑定</b>（支持环境变量 `NINEBOT_ACCOUNT` 跨部署永久打卡）
             </p>
 
             <div id="bindForm" class="hidden" style="margin-top:12px; background:rgba(0,0,0,0.3); padding:16px; border-radius:12px;">
@@ -991,7 +1002,7 @@ HTML_UI = """
             appendLog("正在拉取车辆列表...");
             try {
                 const res = await fetch("/vehicles");
-                const data = me = await res.json();
+                const data = await res.json();
                 appendLog("车辆列表响应:", data);
 
                 const vehicles = data.vehicles || [];
