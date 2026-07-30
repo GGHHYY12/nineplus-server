@@ -382,7 +382,7 @@ def get_vehicle_status(sn: str):
 @app.get("/vehicles/{sn}/battery")
 def get_vehicle_battery(sn: str):
     """Get vehicle battery details."""
-    return run_ninecli_json(["status", sn])
+    return run_ninecli_json(["battery", sn])
 
 
 @app.get("/vehicles/{sn}/travel")
