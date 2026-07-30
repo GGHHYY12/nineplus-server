@@ -18,7 +18,7 @@ logger = logging.getLogger("nineplus_server")
 app = FastAPI(
     title="NinePlus Platform Server",
     description="Standalone Ninebot EV Server powered by ninecli & FastAPI",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 # Enable CORS for browser access
@@ -115,7 +115,7 @@ class BatteryChemistryRequest(BaseModel):
 @app.get("/healthz")
 def health_check():
     """Server health check endpoint required by NinePlus App."""
-    return {"status": "ok", "service": "NinePlus Platform Server", "version": "1.0.0"}
+    return {"status": "ok", "service": "NinePlus Platform Server", "version": "1.1.0"}
 
 
 @app.post("/accounts/login")
@@ -163,6 +163,58 @@ def get_vehicle_battery(sn: str):
     return run_ninecli_json(["status", sn])
 
 
+@app.get("/vehicles/{sn}/travel")
+def get_vehicle_travel(sn: str, month: Optional[str] = None):
+    """Get vehicle travel & ride history requested by NinePlus App."""
+    logger.info(f"Fetching travel data for SN: {sn}, month: {month}")
+    travel_data = run_ninecli_json(["travel", sn])
+    return travel_data
+
+
+@app.post("/vehicles/{sn}/travel-sync")
+def sync_vehicle_travel(sn: str, month: Optional[str] = None, page_size: Optional[int] = 20):
+    """Sync vehicle travel page for iOS App."""
+    logger.info(f"Syncing travel page for SN: {sn}, month: {month}")
+    cli_result = run_ninecli_json(["travel", sn])
+    
+    records = []
+    if isinstance(cli_result, dict):
+        history = cli_result.get("history") or cli_result.get("records") or cli_result.get("detail") or []
+        if isinstance(history, list):
+            for idx, item in enumerate(history):
+                if isinstance(item, dict):
+                    records.append(item)
+                elif isinstance(item, (int, float, str)) and float(item or 0) > 0:
+                    records.append({
+                        "id": f"ride_{idx}",
+                        "mileage": float(item),
+                        "durationMinutes": 15.0,
+                        "startedAt": f"2026-07-{max(1, idx+1):02d}T10:00:00Z",
+                        "raw": {"mileage_km": float(item)}
+                    })
+
+    return {
+        "month": month or "2026-07",
+        "page": 1,
+        "pageSize": page_size or 20,
+        "total": len(records),
+        "hasMore": False,
+        "records": records,
+        "raw": cli_result
+    }
+
+
+@app.get("/vehicles/{sn}/travel/{travel_id}")
+def get_vehicle_travel_detail(sn: str, travel_id: str):
+    """Get detail for a specific trip/ride."""
+    cli_result = run_ninecli_json(["travel", sn])
+    return {
+        "sn": sn,
+        "travel_id": travel_id,
+        "raw": cli_result
+    }
+
+
 @app.get("/vehicles/{sn}/dashboard")
 def get_vehicle_dashboard(sn: str):
     """
@@ -170,14 +222,15 @@ def get_vehicle_dashboard(sn: str):
     Returns status, battery, travel, and prediction in a single payload.
     """
     status = run_ninecli_json(["status", sn])
+    travel_data = run_ninecli_json(["travel", sn])
     
     battery_percent = 0
     estimated_range = 0.0
+    total_mileage = 0.0
     is_locked = False
     is_charging = False
     
     if isinstance(status, dict):
-        # Extract dump_energy or batteryPercent
         soc_val = status.get("dump_energy") or status.get("batteryPercent") or status.get("soc") or status.get("battery") or 0
         try:
             battery_percent = int(float(soc_val))
@@ -197,6 +250,13 @@ def get_vehicle_dashboard(sn: str):
             is_locked = (status.get("lockStatus") == 1 or status.get("isLocked") == True)
             
         is_charging = (status.get("charging") == 1 or status.get("isCharging") == True)
+
+    if isinstance(travel_data, dict):
+        tot = travel_data.get("total_mileage") or travel_data.get("totalMileage") or 0.0
+        try:
+            total_mileage = float(tot)
+        except (ValueError, TypeError):
+            total_mileage = 0.0
 
     dashboard_payload = {
         "vehicle": {
@@ -219,7 +279,10 @@ def get_vehicle_dashboard(sn: str):
             "isCharging": is_charging
         },
         "travel": {
-            "estimatedRange": estimated_range
+            "estimatedRange": estimated_range,
+            "total_mileage": total_mileage,
+            "totalMileage": total_mileage,
+            "raw": travel_data
         },
         "prediction": {
             "range": {
@@ -487,8 +550,8 @@ HTML_UI = """
 <body>
     <div class="container">
         <header>
-            <h1>⚡ NinePlus 服务端调试控制台</h1>
-            <p>基于 ninecli 逆向引擎的九号电动车独立 API 中间件</p>
+            <h1>⚡ NinePlus 服务端控制台 & 车辆调试工具</h1>
+            <p>基于 ninecli 逆向引擎的九号电动车独立 API 中间件 (v1.1)</p>
             <div class="status-badge">
                 <span style="display:inline-block; width:8px; height:8px; background:#34d399; border-radius:50%;"></span>
                 ninecli 引擎就绪 (Ready)
@@ -639,7 +702,7 @@ HTML_UI = """
                     document.getElementById("vehicleTitle").innerText = `🛵 车辆: ${vName} (SN: ${currentSN})`;
                     await loadDashboard();
                 } else {
-                    document.getElementById("vehicleTitle").innerText = "⚠️ 未查找到绑定的车辆";
+                    document.getElementById("vehicleTitle").innerText = "⚠️ 未查到的绑定车辆";
                 }
             } catch (err) {
                 appendLog("拉取车辆列表失败: " + err.message);
