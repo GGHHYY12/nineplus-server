@@ -919,25 +919,219 @@ HTML_UI = """
             --bg-card: rgba(30, 41, 59, 0.7);
             --border-card: rgba(255, 255, 255, 0.1);
             --accent: #10b981;
+            --accent-strong: #059669;
+            --danger: #ef4444;
+            --danger-strong: #dc2626;
+            --warning: #f59e0b;
             --text-primary: #f8fafc;
             --text-secondary: #94a3b8;
+            --shadow: 0 24px 60px rgba(15, 23, 42, 0.45);
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             font-family: 'Outfit', sans-serif;
-            background: radial-gradient(circle at top right, #1e1b4b, #0f172a);
+            background:
+                radial-gradient(circle at top right, rgba(16, 185, 129, 0.20), transparent 28%),
+                radial-gradient(circle at left top, rgba(59, 130, 246, 0.18), transparent 22%),
+                linear-gradient(180deg, #0f172a 0%, #111827 100%);
             color: var(--text-primary);
             min-height: 100vh;
-            padding: 24px 16px;
+            padding: 28px 16px 40px;
             display: flex;
             justify-content: center;
         }
-        .container { width: 100%; max-width: 900px; }
-        header { text-align: center; margin-bottom: 28px; }
+        .container { width: 100%; max-width: 980px; }
+        header { text-align: center; margin-bottom: 24px; }
         header h1 {
-            font-size: 2rem; font-weight: 700;
+            font-size: clamp(2rem, 4vw, 2.8rem);
+            font-weight: 700;
             background: linear-gradient(135deg, #34d399, #10b981);
             -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+        }
+        header p {
+            color: var(--text-secondary);
+            margin-top: 10px;
+            font-size: 1rem;
+        }
+        .status-bar {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+            gap: 14px;
+            margin-bottom: 22px;
+        }
+        .status-card, .panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border-card);
+            border-radius: 22px;
+            box-shadow: var(--shadow);
+            backdrop-filter: blur(18px);
+        }
+        .status-card {
+            padding: 18px 18px 16px;
+        }
+        .status-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.82rem;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+        }
+        .status-value {
+            font-size: 1.2rem;
+            font-weight: 700;
+            word-break: break-word;
+        }
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
+            gap: 18px;
+        }
+        .panel {
+            padding: 22px;
+        }
+        .panel h2 {
+            font-size: 1.15rem;
+            margin-bottom: 6px;
+        }
+        .panel-subtitle {
+            color: var(--text-secondary);
+            font-size: 0.96rem;
+            margin-bottom: 18px;
+            line-height: 1.55;
+        }
+        .form-grid {
+            display: grid;
+            gap: 14px;
+        }
+        label {
+            display: block;
+            font-size: 0.92rem;
+            color: var(--text-secondary);
+            margin-bottom: 7px;
+        }
+        input, textarea {
+            width: 100%;
+            border: 1px solid rgba(148, 163, 184, 0.25);
+            background: rgba(15, 23, 42, 0.55);
+            color: var(--text-primary);
+            border-radius: 14px;
+            padding: 13px 14px;
+            font: inherit;
+            outline: none;
+            transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+        }
+        input:focus, textarea:focus {
+            border-color: rgba(16, 185, 129, 0.75);
+            box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.12);
+            transform: translateY(-1px);
+        }
+        textarea {
+            min-height: 210px;
+            resize: vertical;
+            line-height: 1.45;
+        }
+        .actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-top: 4px;
+        }
+        button {
+            border: none;
+            border-radius: 999px;
+            padding: 12px 18px;
+            font: inherit;
+            font-weight: 700;
+            cursor: pointer;
+            transition: transform 0.18s ease, opacity 0.18s ease, box-shadow 0.18s ease;
+        }
+        button:hover { transform: translateY(-1px); }
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .primary {
+            color: white;
+            background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+            box-shadow: 0 14px 28px rgba(16, 185, 129, 0.28);
+        }
+        .secondary {
+            color: var(--text-primary);
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .danger {
+            color: white;
+            background: linear-gradient(135deg, var(--danger), var(--danger-strong));
+            box-shadow: 0 14px 28px rgba(239, 68, 68, 0.24);
+        }
+        .message {
+            margin-top: 16px;
+            padding: 13px 14px;
+            border-radius: 14px;
+            font-size: 0.94rem;
+            line-height: 1.5;
+            display: none;
+        }
+        .message.show { display: block; }
+        .message.success {
+            background: rgba(16, 185, 129, 0.16);
+            color: #d1fae5;
+            border: 1px solid rgba(16, 185, 129, 0.24);
+        }
+        .message.error {
+            background: rgba(239, 68, 68, 0.12);
+            color: #fecaca;
+            border: 1px solid rgba(239, 68, 68, 0.22);
+        }
+        .message.info {
+            background: rgba(59, 130, 246, 0.12);
+            color: #dbeafe;
+            border: 1px solid rgba(59, 130, 246, 0.22);
+        }
+        .hint-list {
+            display: grid;
+            gap: 12px;
+        }
+        .hint-item {
+            padding: 14px 15px;
+            border-radius: 16px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+        }
+        .hint-title {
+            font-weight: 700;
+            margin-bottom: 5px;
+        }
+        .hint-text {
+            color: var(--text-secondary);
+            font-size: 0.94rem;
+            line-height: 1.55;
+        }
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            border-radius: 999px;
+            padding: 8px 12px;
+            background: rgba(245, 158, 11, 0.12);
+            border: 1px solid rgba(245, 158, 11, 0.22);
+            color: #fde68a;
+            font-size: 0.86rem;
+            margin-top: 14px;
+        }
+        code {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 0.92em;
+        }
+        @media (max-width: 860px) {
+            .layout {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
@@ -945,9 +1139,218 @@ HTML_UI = """
     <div class="container">
         <header>
             <h1>⚡ NinePlus Platform Server</h1>
-            <p>纯 Token 持久化后端已运行</p>
+            <p>管理员入口已恢复。可以在这里登录管理、检查当前九号账号状态、导出或清除后端 Token。</p>
         </header>
+
+        <section class="status-bar">
+            <div class="status-card">
+                <div class="status-label">服务状态</div>
+                <div class="status-value" id="serviceStatus">检查中...</div>
+            </div>
+            <div class="status-card">
+                <div class="status-label">当前九号账号</div>
+                <div class="status-value" id="activeAccount">检查中...</div>
+            </div>
+            <div class="status-card">
+                <div class="status-label">服务版本</div>
+                <div class="status-value" id="serviceVersion">检查中...</div>
+            </div>
+        </section>
+
+        <section class="layout">
+            <div class="panel">
+                <h2>管理员登录</h2>
+                <p class="panel-subtitle">登录后可直接导出当前后端保存的九号 Token，或在需要时清空它。管理员接口没有被删除，这里只是把网页入口补回来了。</p>
+
+                <div class="form-grid">
+                    <div>
+                        <label for="adminUsername">管理员账号</label>
+                        <input id="adminUsername" autocomplete="username" placeholder="默认通常是 admin" />
+                    </div>
+                    <div>
+                        <label for="adminPassword">管理员密码</label>
+                        <input id="adminPassword" type="password" autocomplete="current-password" placeholder="默认通常是 admin123" />
+                    </div>
+                </div>
+
+                <div class="actions">
+                    <button class="primary" id="loginButton" type="button">管理员登录</button>
+                    <button class="secondary" id="exportButton" type="button">导出后端 Token</button>
+                    <button class="danger" id="deleteButton" type="button">清空后端 Token</button>
+                </div>
+
+                <div id="messageBox" class="message"></div>
+
+                <div style="margin-top: 18px;">
+                    <label for="tokenOutput">Token 导出结果</label>
+                    <textarea id="tokenOutput" placeholder="登录后点击“导出后端 Token”，这里会显示当前服务端保存的 tokens.json 内容。"></textarea>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h2>使用说明</h2>
+                <p class="panel-subtitle">如果你的网站和 App 都连的是这个 Render 服务，这个页面就是最直接的管理入口。</p>
+
+                <div class="hint-list">
+                    <div class="hint-item">
+                        <div class="hint-title">1. 先看当前账号</div>
+                        <div class="hint-text">页面会自动读取 <code>/healthz</code>。如果“当前九号账号”显示 <code>未登录</code>，说明后端实例里没有可用 Token。</div>
+                    </div>
+                    <div class="hint-item">
+                        <div class="hint-title">2. 导出 Token 做 Render 备份</div>
+                        <div class="hint-text">登录管理员后点“导出后端 Token”，可以把当前有效的九号 Token 复制出来，保存到 Render 的 <code>NINEBOT_TOKENS_JSON</code> 环境变量。</div>
+                    </div>
+                    <div class="hint-item">
+                        <div class="hint-title">3. 必要时清空后重登</div>
+                        <div class="hint-text">如果后端 Token 已损坏或过期，可以先清空，再从 App 重新登录九号账号，让服务端生成新的 tokens.json。</div>
+                    </div>
+                </div>
+
+                <div class="badge">Render 冷启动后第一次响应可能更慢，这个页面会自动刷新服务状态。</div>
+            </div>
+        </section>
     </div>
+
+    <script>
+        const els = {
+            serviceStatus: document.getElementById("serviceStatus"),
+            activeAccount: document.getElementById("activeAccount"),
+            serviceVersion: document.getElementById("serviceVersion"),
+            username: document.getElementById("adminUsername"),
+            password: document.getElementById("adminPassword"),
+            tokenOutput: document.getElementById("tokenOutput"),
+            messageBox: document.getElementById("messageBox"),
+            loginButton: document.getElementById("loginButton"),
+            exportButton: document.getElementById("exportButton"),
+            deleteButton: document.getElementById("deleteButton")
+        };
+
+        function setMessage(type, text) {
+            els.messageBox.className = "message show " + type;
+            els.messageBox.textContent = text;
+        }
+
+        function clearMessage() {
+            els.messageBox.className = "message";
+            els.messageBox.textContent = "";
+        }
+
+        function credentials() {
+            return {
+                username: els.username.value.trim(),
+                password: els.password.value
+            };
+        }
+
+        function requireCredentials() {
+            const creds = credentials();
+            if (!creds.username || !creds.password) {
+                setMessage("error", "请先填写管理员账号和密码。");
+                return null;
+            }
+            return creds;
+        }
+
+        async function requestJSON(url, options = {}) {
+            const response = await fetch(url, {
+                headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+                ...options
+            });
+            const text = await response.text();
+            let data = null;
+            try {
+                data = text ? JSON.parse(text) : null;
+            } catch {
+                data = { raw: text };
+            }
+            if (!response.ok) {
+                const detail = data && (data.detail || data.message || data.raw) ? (data.detail || data.message || data.raw) : response.statusText;
+                throw new Error(detail || ("HTTP " + response.status));
+            }
+            return data;
+        }
+
+        async function refreshHealth() {
+            try {
+                const data = await requestJSON("/healthz", { method: "GET" });
+                els.serviceStatus.textContent = data.status || "ok";
+                els.activeAccount.textContent = data.active_account || "未登录";
+                els.serviceVersion.textContent = data.version || "-";
+            } catch (error) {
+                els.serviceStatus.textContent = "不可用";
+                els.activeAccount.textContent = "读取失败";
+                els.serviceVersion.textContent = "-";
+                setMessage("error", "服务状态读取失败: " + error.message);
+            }
+        }
+
+        async function adminLogin() {
+            clearMessage();
+            const creds = requireCredentials();
+            if (!creds) return;
+            els.loginButton.disabled = true;
+            try {
+                const data = await requestJSON("/admin/login", {
+                    method: "POST",
+                    body: JSON.stringify(creds)
+                });
+                setMessage("success", data.message || "管理员登录成功。");
+            } catch (error) {
+                setMessage("error", "管理员登录失败: " + error.message);
+            } finally {
+                els.loginButton.disabled = false;
+            }
+        }
+
+        async function exportToken() {
+            clearMessage();
+            const creds = requireCredentials();
+            if (!creds) return;
+            els.exportButton.disabled = true;
+            try {
+                const data = await requestJSON("/admin/export-token", {
+                    method: "POST",
+                    body: JSON.stringify(creds)
+                });
+                const tokenText = data.token_json_string || "";
+                els.tokenOutput.value = tokenText;
+                setMessage("success", tokenText ? "Token 已导出，可以复制到 Render 环境变量。": (data.message || "当前没有可导出的 Token。"));
+            } catch (error) {
+                setMessage("error", "导出 Token 失败: " + error.message);
+            } finally {
+                els.exportButton.disabled = false;
+            }
+        }
+
+        async function deleteToken() {
+            clearMessage();
+            const creds = requireCredentials();
+            if (!creds) return;
+            if (!confirm("确认要清空当前后端保存的九号 Token 吗？清空后 App 需要重新登录。")) {
+                return;
+            }
+            els.deleteButton.disabled = true;
+            try {
+                const data = await requestJSON("/admin/token", {
+                    method: "DELETE",
+                    body: JSON.stringify(creds)
+                });
+                els.tokenOutput.value = "";
+                setMessage("info", data.message || "后端 Token 已清空。");
+                await refreshHealth();
+            } catch (error) {
+                setMessage("error", "清空 Token 失败: " + error.message);
+            } finally {
+                els.deleteButton.disabled = false;
+            }
+        }
+
+        els.loginButton.addEventListener("click", adminLogin);
+        els.exportButton.addEventListener("click", exportToken);
+        els.deleteButton.addEventListener("click", deleteToken);
+
+        refreshHealth();
+    </script>
 </body>
 </html>
 """
