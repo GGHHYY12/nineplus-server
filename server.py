@@ -124,8 +124,7 @@ def run_ninecli_json(args: List[str]) -> Any:
                 return {"raw": stdout_str, "status": "ok"}
         
         if stderr_str:
-            logger.error(f"ninecli returned empty stdout but has stderr: {stderr_str}")
-            raise HTTPException(status_code=502, detail=f"九号服务异常: {stderr_str}")
+            logger.info(f"ninecli completed successfully with returncode 0 and stderr logs: {stderr_str}")
             
         return {"status": "ok", "message": "操作成功"}
     except subprocess.TimeoutExpired:
