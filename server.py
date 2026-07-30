@@ -19,7 +19,7 @@ logger = logging.getLogger("nineplus_server")
 app = FastAPI(
     title="NinePlus Platform Server",
     description="Standalone Ninebot EV Server powered by ninecli & Token Auth Middleware",
-    version="2.3.0",
+    version="2.4.0",
 )
 
 # Enable CORS for browser access
@@ -39,7 +39,7 @@ DEFAULT_TOKEN_JSON = json.dumps({
   "region": "bj",
   "areaCode": "86",
   "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMTQ0Mzk0ODIwODQwNzIyNDMyIiwiYXVkaWVuY2UiOiJ1bmtub3duIiwidXNlcl9uYW1lIjoi6IC_5a6P5a6HIiwiY2xpZW50X2lkIjoidmVoaWNsZV9hcHBfcHJvZCIsInJlZ19kYXRlIjoxNjkyODg2NTg3LCJhdWQiOlsiaW90LXdlYmFwcCJdLCJhcmVhQ29kZSI6Ijg2IiwicGhvbmUiOiIxNzc0MDY5NjE2NSIsInNjb3BlIjpbInJlYWQiXSwiZXhwIjoxNzg3OTcwMDQ3LCJyZWdpb24iOiJiaiIsImp0aSI6IlVRT1hCQkFtV3RFcVBpaGh3YzNTWjBueG50byIsImVtYWlsIjpudWxsfQ.lSJ-U0EjRUAcCNgJiFHbZeIak41bFb4JobjVR1665uCYsR0y28oZtvboQLWWT4_dDK_IZslUlwIjQjIjh0w-ik8jbo41ikRWEVLnre6ydIY_ozK_3s86qeMM7oIt2A_tLjHKW4Sfyl55ayrHw4SZNxWbsCqsfhU8gXSQnGKwsPU",
-  "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMTQ0Mzk0ODIwODQwNzIyNDMyIiwiYXVkaWVuY2UiOiJ1bmtub3duIiwidXNlcl9uYW1lIjoi6IC_5a6P5a6HIiwiY2xpZW50X2lkIjoidmVoaWNsZV9hcHBfcHJvZCIsInJlZ19kYXRlIjoxNjkyODg2NTg3LCJhdWQiOlsiaW90LXdlYmFwcCJdLCJhcmVhQ29kZSI6Ijg2IiwicGhvbmUiOiIxNzc0MDY5NjE2NSIsInNjb3BlIjpbInJlYWQiXSwiYXRpIjoiVVFPWEJCQW1XdEVxUGloaHdjM1NaMG54bnRvIiwiZXhwIjoxODAwOTMwMDQ3LCJyZWdpb24iOiJiaiIsImp0aSI6InNOTVFGYzBCa09UR3lld0U5SlBDd3JsTlN1VSIsImVtYWlsIjpudWxsfQ.IR8Q4yWY17x3eR37SnGLkLc_oYiUU64p-XE3o58LBEc65gc-rvdF_QM8WzfjLEmRvDudfZObeXME8GV2d6luvE0Y5w7k9I-REhy79ylDnc_8x4Xq7NbXEIk3JP1V_BCFDs3e-jODlYTwlND_Q43LMEuvYUu7a8jMBO3FW_zV1vk",
+  "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMTQ0Mzk0ODIwODQwNzIyNDMyIiwiYXVkaWVuY2UiOiJ1bmtub3duIiwidXNlcl9uYW1lIjoi6IC_5a6P5a6HIiwiY2xpZW50X2lkIjoidmVoaWNsZV9hcHBfcHJvZCIsInJlZ19kYXRlIjoxNjkyODg2NTg3LCJhdWQiOlsiaW90LXdlYmFwcCJdLCJhcmVhQ29kZSI6Ijg2IiwicGhvbmUiOiIxNzc0MDY5NjE2NSIsInNjb3BlIjpbInJlYWQiXSwiYXRpIjoiVVFPWEJCQW1XdEVxUGloaHdjM3NaMG54bnRvIiwiZXhwIjoxODAwOTMwMDQ3LCJyZWdpb24iOiJiaiIsImp0aSI6InNOTVFGYzBCa09UR3lld0U5SlBDd3JsTlN1VSIsImVtYWlsIjpudWxsfQ.IR8Q4yWY17x3eR37SnGLkLc_oYiUU64p-XE3o58LBEc65gc-rvdF_QM8WzfjLEmRvDudfZObeXME8GV2d6luvE0Y5w7k9I-REhy79ylDnc_8x4Xq7NbXEIk3JP1V_BCFDs3e-jODlYTwlND_Q43LMEuvYUu7a8jMBO3FW_zV1vk",
   "accessTokenValidity": "1787970047966",
   "business_uid": "96665471",
   "saved_at": 1785378048
@@ -153,10 +153,35 @@ def normalize_vehicle(v: dict) -> dict:
     }
 
 
+BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
+def format_china_date(ts_val: Any, fmt_str: Any = None) -> str:
+    """
+    Convert timestamp or date string to Beijing Time (UTC+8) 'YYYY-MM-DD HH:mm:ss'.
+    Ensures start_time & end_time are perfectly synchronized in local timezone to prevent Swift duration mismatch.
+    """
+    if ts_val:
+        try:
+            ts_num = float(ts_val)
+            if ts_num > 1e11:
+                ts_num /= 1000.0
+            dt = datetime.datetime.fromtimestamp(ts_num, tz=BEIJING_TZ)
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError, OverflowError):
+            pass
+            
+    if fmt_str and isinstance(fmt_str, str):
+        clean = fmt_str.strip().replace("T", " ").replace("Z", "")
+        return clean[:19]
+
+    return "2026-07-30 08:00:00"
+
+
 def normalize_trip_record(raw_item: dict, index: int = 0) -> dict:
     """
     Normalize Ninebot raw trip record from ninecli.
     Provides ALL field aliases expected by NinePlus iOS App in both Swift & JSON decoders.
+    Synchronizes start/end timestamps into Beijing Time to prevent saneDuration calculation drops.
     """
     t_id = str(raw_item.get("travel_id") or raw_item.get("id") or raw_item.get("ride_id") or f"ride_{index}")
     
@@ -186,26 +211,11 @@ def normalize_trip_record(raw_item: dict, index: int = 0) -> dict:
 
     start_ts = raw_item.get("start_time") or raw_item.get("started_at")
     end_ts = raw_item.get("end_time") or raw_item.get("ended_at")
+    start_fmt = raw_item.get("start_time_format")
+    end_fmt = raw_item.get("end_time_format")
     
-    start_str = raw_item.get("start_time_format")
-    end_str = raw_item.get("end_time_format")
-    
-    if not start_str and start_ts:
-        try:
-            dt = datetime.datetime.fromtimestamp(float(start_ts), tz=datetime.timezone.utc)
-            start_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-        except Exception:
-            start_str = "2026-07-30 08:00:00"
-            
-    if not end_str and end_ts:
-        try:
-            dt = datetime.datetime.fromtimestamp(float(end_ts), tz=datetime.timezone.utc)
-            end_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-        except Exception:
-            end_str = "2026-07-30 08:15:00"
-            
-    if not start_str: start_str = "2026-07-30 08:00:00"
-    if not end_str: end_str = "2026-07-30 08:15:00"
+    start_str = format_china_date(start_ts, start_fmt)
+    end_str = format_china_date(end_ts, end_fmt)
 
     speed_val = 0.0
     spd = raw_item.get("speed") or raw_item.get("avg_speed") or raw_item.get("max_speed")
@@ -243,12 +253,12 @@ def normalize_trip_record(raw_item: dict, index: int = 0) -> dict:
         "avgSpeed": speed_val,
         "average_speed": speed_val,
         "averageSpeed": speed_val,
-        "start_time": start_ts or start_str,
-        "startTime": start_ts or start_str,
+        "start_time": start_str,
+        "startTime": start_str,
         "started_at": start_str,
         "startedAt": start_str,
-        "end_time": end_ts or end_str,
-        "endTime": end_ts or end_str,
+        "end_time": end_str,
+        "endTime": end_str,
         "ended_at": end_str,
         "endedAt": end_str,
         "used_electricity": energy_val,
@@ -288,7 +298,7 @@ def startup_event():
 @app.get("/healthz")
 def health_check():
     """Server health check endpoint required by NinePlus App."""
-    return {"status": "ok", "service": "NinePlus Platform Server (Pure Token Mode)", "version": "2.3.0", "active_account": "17740696165"}
+    return {"status": "ok", "service": "NinePlus Platform Server (Pure Token Mode)", "version": "2.4.0", "active_account": "17740696165"}
 
 
 @app.post("/admin/login")
@@ -832,7 +842,7 @@ HTML_UI = """
     <div class="container">
         <header>
             <h1>⚡ NinePlus 服务端纯 Token 模式后台</h1>
-            <p>基于预生成 Token 的免登录云端中间件 (v2.3 - 终极适配 Swift 模型结构)</p>
+            <p>基于预生成 Token 的免登录云端中间件 (v2.4 - 时区同步修复)</p>
             <div class="status-badge">
                 <span style="display:inline-block; width:8px; height:8px; background:#34d399; border-radius:50%;"></span>
                 纯 Token 模式激活 (永不挤掉官方 App)
