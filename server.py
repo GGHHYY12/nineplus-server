@@ -312,6 +312,47 @@ def normalize_trip_record(raw_item: dict, index: int = 0) -> dict:
     return normalized
 
 
+def normalize_user_details(token_data: dict, account: str = "") -> dict:
+    """Provide exhaustive field aliases for NinePlus Swift Codable decoders."""
+    if not isinstance(token_data, dict):
+        token_data = {}
+        
+    access_token = str(token_data.get("access_token") or token_data.get("token") or token_data.get("accessToken") or "")
+    refresh_token = str(token_data.get("refresh_token") or token_data.get("refreshToken") or "")
+    uuid_val = str(token_data.get("uuid") or token_data.get("uid") or token_data.get("user_id") or token_data.get("userId") or token_data.get("id") or "1144394820840722432")
+    username_val = str(token_data.get("username") or token_data.get("nickname") or token_data.get("nickName") or token_data.get("name") or token_data.get("userName") or "九号用户")
+    phone_val = str(token_data.get("phone") or token_data.get("mobile") or token_data.get("phoneNumber") or account or "17740696165")
+    
+    normalized = {
+        **token_data,
+        "token": access_token,
+        "access_token": access_token,
+        "accessToken": access_token,
+        "refresh_token": refresh_token,
+        "refreshToken": refresh_token,
+        "uuid": uuid_val,
+        "uid": uuid_val,
+        "user_id": uuid_val,
+        "userId": uuid_val,
+        "id": uuid_val,
+        "username": username_val,
+        "userName": username_val,
+        "nickname": username_val,
+        "nickName": username_val,
+        "name": username_val,
+        "phone": phone_val,
+        "mobile": phone_val,
+        "phoneNumber": phone_val,
+        "account": phone_val,
+        "avatar": token_data.get("avatar", ""),
+        "avatarUrl": token_data.get("avatarUrl", ""),
+        "avatar_url": token_data.get("avatar_url", ""),
+        "headImg": token_data.get("headImg", ""),
+        "head_img": token_data.get("head_img", "")
+    }
+    return normalized
+
+
 # --- Pydantic Models ---
 class LoginRequest(BaseModel):
     account: str
@@ -429,12 +470,14 @@ def login(req: LoginRequest):
         if os.path.exists(token_file):
             with open(token_file, "r", encoding="utf-8") as f:
                 token_data = json.load(f)
-        return {"status": "ok", "account": req.account, "details": token_data or payload}
+        user_info = normalize_user_details(token_data or payload, req.account)
+        return {"status": "ok", "account": req.account, "details": user_info, "user": user_info, "data": user_info}
     except Exception as e:
         logger.warning(f"ninecli login failed ({e}), checking fallback token_data...")
         if token_data:
-            logger.info("Returning fallback token_data to complete iOS app login UI state.")
-            return {"status": "ok", "account": req.account, "details": token_data}
+            logger.info("Returning fallback normalized token_data to complete iOS app login UI state.")
+            user_info = normalize_user_details(token_data, req.account)
+            return {"status": "ok", "account": req.account, "details": user_info, "user": user_info, "data": user_info}
         raise e
 
 
