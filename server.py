@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 from typing import Any, Dict, List, Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
@@ -18,7 +18,7 @@ logger = logging.getLogger("nineplus_server")
 app = FastAPI(
     title="NinePlus Platform Server",
     description="Standalone Ninebot EV Server powered by ninecli & FastAPI",
-    version="1.4.0",
+    version="1.5.0",
 )
 
 # Enable CORS for browser access
@@ -32,6 +32,7 @@ app.add_middleware(
 
 # Persistent Session & Credential Store File
 SESSION_FILE = os.path.join(os.path.expanduser("~"), ".nineplus_session.json")
+ADMIN_CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".nineplus_admin_config.json")
 
 class NinebotSessionStore:
     def __init__(self):
@@ -79,6 +80,35 @@ class NinebotSessionStore:
                 logger.warning(f"Failed to remove session file: {e}")
 
 session_store = NinebotSessionStore()
+
+
+# --- Independent Admin Credentials Store ---
+class AdminAuthStore:
+    def __init__(self):
+        self.admin_user = os.environ.get("ADMIN_USER", "admin")
+        self.admin_pass = os.environ.get("ADMIN_PASS", "admin123")
+        self.load()
+
+    def load(self):
+        if os.path.exists(ADMIN_CONFIG_FILE):
+            try:
+                with open(ADMIN_CONFIG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.admin_user = data.get("admin_user", self.admin_user)
+                    self.admin_pass = data.get("admin_pass", self.admin_pass)
+            except Exception as e:
+                logger.warning(f"Failed to load admin config: {e}")
+
+    def update(self, new_user: str, new_pass: str):
+        self.admin_user = new_user
+        self.admin_pass = new_pass
+        try:
+            with open(ADMIN_CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump({"admin_user": self.admin_user, "admin_pass": self.admin_pass}, f)
+        except Exception as e:
+            logger.warning(f"Failed to save admin config: {e}")
+
+admin_store = AdminAuthStore()
 
 
 def auto_reauth_if_needed():
@@ -169,6 +199,14 @@ class LoginRequest(BaseModel):
     account: str
     password: str
 
+class AdminLoginRequest(BaseModel):
+    username: str
+    password: str
+
+class UpdateAdminPassRequest(BaseModel):
+    new_username: str
+    new_password: str
+
 class BatteryChemistryRequest(BaseModel):
     battery_chemistry: str
     nominal_voltage: Optional[str] = None
@@ -184,18 +222,33 @@ def startup_event():
         auto_reauth_if_needed()
 
 
-# --- REST API Endpoints for NinePlus App & Admin ---
+# --- REST API Endpoints for NinePlus App & Independent Admin ---
 
 @app.get("/healthz")
 def health_check():
     """Server health check endpoint required by NinePlus App."""
-    return {"status": "ok", "service": "NinePlus Platform Server", "version": "1.4.0", "active_account": session_store.account}
+    return {"status": "ok", "service": "NinePlus Platform Server", "version": "1.5.0", "active_account": session_store.account}
+
+
+@app.post("/admin/login")
+def admin_login(req: AdminLoginRequest):
+    """Independent Admin Portal Authentication Login."""
+    if req.username == admin_store.admin_user and req.password == admin_store.admin_pass:
+        return {"status": "ok", "message": "管理员登录成功", "token": "admin_session_valid"}
+    raise HTTPException(status_code=401, detail="管理员用户名或密码错误")
+
+
+@app.post("/admin/update-credentials")
+def update_admin_credentials(req: UpdateAdminPassRequest):
+    """Update Admin username & password."""
+    admin_store.update(req.new_username, req.new_password)
+    return {"status": "ok", "message": "管理员密码更新成功"}
 
 
 @app.post("/accounts/login")
 def login(req: LoginRequest):
     """Account login endpoint using ninecli with persistent session storage."""
-    logger.info(f"Login request for account: {req.account}")
+    logger.info(f"Login request for Ninebot account: {req.account}")
     payload = run_ninecli_json(["login", "-u", req.account, "-p", req.password])
     
     token = "ninecli_session_active"
@@ -208,7 +261,7 @@ def login(req: LoginRequest):
 
 @app.post("/admin/clear-session")
 def clear_admin_session():
-    """Admin endpoint to clear persistent session token and logout."""
+    """Admin endpoint to clear persistent session token and logout Ninebot account."""
     account = session_store.account
     session_store.clear()
     return {"status": "ok", "message": f"管理员已成功清除账号 {account} 的持久化 Token 并退出会话"}
@@ -457,7 +510,7 @@ HTML_UI = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ NinePlus 服务端控制台 & 管理中心</title>
+    <title>⚡ NinePlus 服务端独立管理后台</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -653,7 +706,8 @@ HTML_UI = """
         }
 
         .admin-box {
-            display: flex;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 12px;
             margin-top: 12px;
         }
@@ -664,33 +718,33 @@ HTML_UI = """
 <body>
     <div class="container">
         <header>
-            <h1>⚡ NinePlus 服务端控制台 & 管理中心</h1>
-            <p>基于 ninecli 逆向引擎的九号电动车独立 API 中间件 (v1.4)</p>
+            <h1>⚡ NinePlus 服务端独立管理后台</h1>
+            <p>私有云端中间件后台控制台 (v1.5)</p>
             <div class="status-badge">
                 <span style="display:inline-block; width:8px; height:8px; background:#34d399; border-radius:50%;"></span>
-                ninecli 引擎就绪 (Ready)
+                独立管理员系统 (Admin Portal Active)
             </div>
         </header>
 
-        <!-- 登录卡片 -->
-        <div class="card" id="loginCard">
-            <h2>🔑 登录九号账号 (初始化服务器)</h2>
+        <!-- 管理员登录入口卡片 -->
+        <div class="card" id="adminLoginCard">
+            <h2>🔐 独立管理员控制台登录</h2>
             <p style="color:var(--text-secondary); font-size:0.85rem; margin-bottom:16px;">
-                输入你的九号 App 绑定的手机号和密码（使用 ninecli 引擎安全认证，支持自动持久化与无感恢复）
+                请输入管理员后台账号密码（默认账号：<b>admin</b>，默认密码：<b>admin123</b>，绝对不接触九号服务器登录）
             </p>
 
             <div class="form-group">
-                <label>九号账号 (手机号)</label>
-                <input type="text" id="accountInput" placeholder="例如: 13800138000">
+                <label>管理员用户名</label>
+                <input type="text" id="adminUserInput" value="admin">
             </div>
             <div class="form-group">
-                <label>密码</label>
-                <input type="password" id="passwordInput" placeholder="输入账号密码">
+                <label>管理员密码</label>
+                <input type="password" id="adminPassInput" value="admin123">
             </div>
-            <button class="btn" id="loginBtn" onclick="doLogin()">确认登录并获取车辆数据</button>
+            <button class="btn" id="adminLoginBtn" onclick="doAdminLogin()">登录管理员后台</button>
         </div>
 
-        <!-- 车辆数据展示卡片 -->
+        <!-- 车辆数据展示卡片 (登录管理员后展示) -->
         <div class="card hidden" id="dashboardCard">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
                 <h2 id="vehicleTitle">🛵 车辆数据加载中...</h2>
@@ -725,15 +779,29 @@ HTML_UI = """
             </div>
         </div>
 
-        <!-- 管理员控制中心卡片 -->
-        <div class="card hidden" id="adminControlCard">
-            <h2>🛠️ 管理员控制面板</h2>
+        <!-- 九号账号绑定管理卡片 -->
+        <div class="card hidden" id="ninebotBindCard">
+            <h2>🔑 九号账号绑定管理</h2>
             <p style="color:var(--text-secondary); font-size:0.85rem; margin-bottom:12px;">
-                当前管理绑定账号：<b id="activeAccountText" style="color:#34d399;">--</b> （服务器具有自动永久打卡与持久化权限）
+                当前后台打卡绑定账号：<b id="activeAccountText" style="color:#34d399;">未绑定</b>（平时仅纯查询，绝对不会重复登录挤掉官方 App）
             </p>
+
+            <div id="bindForm" class="hidden" style="margin-top:12px; background:rgba(0,0,0,0.3); padding:16px; border-radius:12px;">
+                <h4 style="margin-bottom:8px; font-size:0.95rem;">重新绑定九号账号：</h4>
+                <div class="form-group">
+                    <label>九号手机号</label>
+                    <input type="text" id="ninebotAccountInput" placeholder="13800138000">
+                </div>
+                <div class="form-group">
+                    <label>九号密码</label>
+                    <input type="password" id="ninebotPassInput" placeholder="输入密码">
+                </div>
+                <button class="btn" onclick="doNinebotBind()">提交绑定九号账号</button>
+            </div>
+
             <div class="admin-box">
-                <button class="btn btn-secondary" onclick="loadVehicles()">🔄 手动刷新并拉取最新凭证</button>
-                <button class="btn btn-danger" onclick="clearAdminSession()">🧹 清除当前凭证并解绑退出</button>
+                <button class="btn btn-secondary" onclick="toggleBindForm()">🔄 重新绑定/切换九号账号</button>
+                <button class="btn btn-danger" onclick="clearNinebotSession()">🧹 仅解绑九号账号 (清除持久化Token)</button>
             </div>
         </div>
 
@@ -749,8 +817,8 @@ HTML_UI = """
             </p>
         </div>
 
-        <!-- 实时日志与 Raw JSON -->
-        <div class="card">
+        <!-- 实时日志卡片 -->
+        <div class="card hidden" id="logCard">
             <h2>📜 实时接口响应日志</h2>
             <div class="log-box" id="logBox">等待操作...</div>
         </div>
@@ -758,6 +826,7 @@ HTML_UI = """
 
     <script>
         let currentSN = "";
+        let isAdminLoggedIn = false;
 
         function appendLog(text, obj = null) {
             const logBox = document.getElementById("logBox");
@@ -768,38 +837,71 @@ HTML_UI = """
             logBox.innerText = msg + "\\n\\n" + logBox.innerText;
         }
 
-        async function checkServerHealth() {
+        async function doAdminLogin() {
+            const username = document.getElementById("adminUserInput").value.trim();
+            const password = document.getElementById("adminPassInput").value.trim();
+
+            if (!username || !password) {
+                alert("请输入管理员用户名和密码");
+                return;
+            }
+
+            try {
+                const res = await fetch("/admin/login", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ username, password })
+                });
+                const data = await res.json();
+
+                if (!res.ok) {
+                    throw new Error(data.detail || "管理员认证失败");
+                }
+
+                isAdminLoggedIn = true;
+                appendLog("管理员独立登录成功！");
+                document.getElementById("adminLoginCard").classList.add("hidden");
+                document.getElementById("dashboardCard").classList.remove("hidden");
+                document.getElementById("ninebotBindCard").classList.remove("hidden");
+                document.getElementById("connectInfoCard").classList.remove("hidden");
+                document.getElementById("logCard").classList.remove("hidden");
+                document.getElementById("serverUrlInput").value = window.location.origin;
+
+                await checkServerStatus();
+            } catch (err) {
+                alert("管理员登录失败: " + err.message);
+            }
+        }
+
+        async function checkServerStatus() {
             try {
                 const res = await fetch("/healthz");
                 const data = await res.json();
                 if (data.active_account) {
-                    appendLog(`检测到服务器已持久化绑定管理员账号: ${data.active_account}`);
                     document.getElementById("activeAccountText").innerText = data.active_account;
-                    document.getElementById("loginCard").classList.add("hidden");
-                    document.getElementById("dashboardCard").classList.remove("hidden");
-                    document.getElementById("adminControlCard").classList.remove("hidden");
-                    document.getElementById("connectInfoCard").classList.remove("hidden");
-                    document.getElementById("serverUrlInput").value = window.location.origin;
                     await loadVehicles();
+                } else {
+                    document.getElementById("activeAccountText").innerText = "暂无持久化打卡账号";
+                    document.getElementById("bindForm").classList.remove("hidden");
                 }
             } catch (e) {
-                appendLog("健康检查完成");
+                appendLog("拉取服务器状态完成");
             }
         }
 
-        async function doLogin() {
-            const account = document.getElementById("accountInput").value.trim();
-            const password = document.getElementById("passwordInput").value.trim();
-            const loginBtn = document.getElementById("loginBtn");
+        function toggleBindForm() {
+            const form = document.getElementById("bindForm");
+            form.classList.toggle("hidden");
+        }
+
+        async function doNinebotBind() {
+            const account = document.getElementById("ninebotAccountInput").value.trim();
+            const password = document.getElementById("ninebotPassInput").value.trim();
 
             if (!account || !password) {
-                alert("请输入完整的账号和密码");
+                alert("请输入九号账号和密码");
                 return;
             }
-
-            loginBtn.disabled = true;
-            loginBtn.innerText = "正在通过 ninecli 验证认证...";
-            appendLog(`发起 ninecli 认证登录: ${account}`);
 
             try {
                 const res = await fetch("/accounts/login", {
@@ -810,39 +912,29 @@ HTML_UI = """
                 const data = await res.json();
 
                 if (!res.ok) {
-                    throw new Error(data.detail || "登录失败");
+                    throw new Error(data.detail || "绑定失败");
                 }
 
-                appendLog("九号账号登录成功，凭证已永久持久化存入服务器!", data);
+                appendLog("九号账号绑定成功，打卡 Token 已持久化!", data);
+                alert("绑定成功！");
                 document.getElementById("activeAccountText").innerText = account;
-                document.getElementById("loginCard").classList.add("hidden");
-                document.getElementById("dashboardCard").classList.remove("hidden");
-                document.getElementById("adminControlCard").classList.remove("hidden");
-                document.getElementById("connectInfoCard").classList.remove("hidden");
-                
-                const localIP = window.location.origin;
-                document.getElementById("serverUrlInput").value = localIP;
-
+                document.getElementById("bindForm").classList.add("hidden");
                 await loadVehicles();
             } catch (err) {
-                appendLog("登录出错: " + err.message);
-                alert("登录失败: " + err.message);
-            } finally {
-                loginBtn.disabled = false;
-                loginBtn.innerText = "确认登录并获取车辆数据";
+                alert("绑定失败: " + err.message);
             }
         }
 
-        async function clearAdminSession() {
-            if (!confirm("确认要作为管理员清除持久化 Token 并解绑下线吗？")) return;
+        async function clearNinebotSession() {
+            if (!confirm("确认要解绑当前九号账号并清除 Token 吗？")) return;
             try {
                 const res = await fetch("/admin/clear-session", { method: "POST" });
                 const data = await res.json();
-                appendLog("管理员清理凭证:", data);
-                alert("凭证已清除！服务器已解绑");
-                window.location.reload();
+                appendLog("解绑响应:", data);
+                alert("已成功解绑九号账号！");
+                document.getElementById("activeAccountText").innerText = "未绑定";
             } catch (err) {
-                alert("清理失败: " + err.message);
+                alert("解绑失败: " + err.message);
             }
         }
 
@@ -916,9 +1008,6 @@ HTML_UI = """
                 alert("发送指令失败: " + err.message);
             }
         }
-
-        // On page load, auto check health
-        checkServerHealth();
     </script>
 </body>
 </html>
@@ -926,7 +1015,7 @@ HTML_UI = """
 
 @app.get("/", response_class=HTMLResponse)
 def index_ui():
-    """Renders the Interactive Web Console & Admin Panel."""
+    """Renders the Independent Admin Portal System."""
     return HTML_UI
 
 
