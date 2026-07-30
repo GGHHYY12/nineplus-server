@@ -546,6 +546,7 @@ def get_vehicle_dashboard(sn: str):
     """
     status = run_ninecli_json(["status", sn])
     travel_data = run_ninecli_json(["travel", sn])
+    battery_data = run_ninecli_json(["battery", sn])
     
     battery_percent = 0
     estimated_range = 0.0
@@ -622,6 +623,7 @@ def get_vehicle_dashboard(sn: str):
             "raw": status
         },
         "battery": {
+            **(battery_data if isinstance(battery_data, dict) else {}),
             "soc": battery_percent,
             "batteryPercent": battery_percent,
             "isCharging": is_charging
