@@ -45,6 +45,7 @@ DEFAULT_TOKEN_JSON = json.dumps({
   "saved_at": 1785378048
 }, ensure_ascii=False)
 
+
 def write_ninebot_tokens_to_disk(raw_json_str: str):
     """Write Ninebot token JSON to ninecli's persistent configuration path."""
     if sys.platform == "win32":
@@ -114,18 +115,11 @@ def run_ninecli_json(args: List[str]) -> Any:
                 desc = match.group(1)
                 if desc.lower() not in ("success", "ok", "00000"):
                     logger.warning(f"ninecli returned error desc: {desc}")
-                    if any(keyword in desc.lower() for keyword in ["token", "login", "auth", "expire", "invalid", "unauthorized", "未登录", "失效", "过期"]):
-                        raise HTTPException(status_code=401, detail=f"九号账号授权已过期，请重新登录: {desc}")
                     raise HTTPException(status_code=400, detail=f"九号服务请求失败: {desc}")
 
         if result.returncode != 0:
             err_msg = stderr_str or stdout_str or f"exit code {result.returncode}"
             logger.error(f"ninecli process error: {err_msg}")
-            
-            # Catch common auth errors in raw output
-            if any(keyword in err_msg.lower() for keyword in ["401", "unauthorized", "token", "expire"]):
-                raise HTTPException(status_code=401, detail="九号账号授权已失效，请重新登录")
-                
             raise HTTPException(status_code=400, detail=f"九号服务请求失败: {err_msg}")
         
         if stdout_str:
@@ -135,7 +129,8 @@ def run_ninecli_json(args: List[str]) -> Any:
                 return {"raw": stdout_str, "status": "ok"}
         
         if stderr_str:
-            logger.info(f"ninecli completed successfully with returncode 0 and stderr logs: {stderr_str}")
+            logger.error(f"ninecli returned empty stdout but has stderr: {stderr_str}")
+            raise HTTPException(status_code=502, detail=f"九号服务异常: {stderr_str}")
             
         return {"status": "ok", "message": "操作成功"}
     except subprocess.TimeoutExpired:
@@ -312,47 +307,6 @@ def normalize_trip_record(raw_item: dict, index: int = 0) -> dict:
     return normalized
 
 
-def normalize_user_details(token_data: dict, account: str = "") -> dict:
-    """Provide exhaustive field aliases for NinePlus Swift Codable decoders."""
-    if not isinstance(token_data, dict):
-        token_data = {}
-        
-    access_token = str(token_data.get("access_token") or token_data.get("token") or token_data.get("accessToken") or "")
-    refresh_token = str(token_data.get("refresh_token") or token_data.get("refreshToken") or "")
-    uuid_val = str(token_data.get("uuid") or token_data.get("uid") or token_data.get("user_id") or token_data.get("userId") or token_data.get("id") or "1144394820840722432")
-    username_val = str(token_data.get("username") or token_data.get("nickname") or token_data.get("nickName") or token_data.get("name") or token_data.get("userName") or "九号用户")
-    phone_val = str(token_data.get("phone") or token_data.get("mobile") or token_data.get("phoneNumber") or account or "17740696165")
-    
-    normalized = {
-        **token_data,
-        "token": access_token,
-        "access_token": access_token,
-        "accessToken": access_token,
-        "refresh_token": refresh_token,
-        "refreshToken": refresh_token,
-        "uuid": uuid_val,
-        "uid": uuid_val,
-        "user_id": uuid_val,
-        "userId": uuid_val,
-        "id": uuid_val,
-        "username": username_val,
-        "userName": username_val,
-        "nickname": username_val,
-        "nickName": username_val,
-        "name": username_val,
-        "phone": phone_val,
-        "mobile": phone_val,
-        "phoneNumber": phone_val,
-        "account": phone_val,
-        "avatar": token_data.get("avatar", ""),
-        "avatarUrl": token_data.get("avatarUrl", ""),
-        "avatar_url": token_data.get("avatar_url", ""),
-        "headImg": token_data.get("headImg", ""),
-        "head_img": token_data.get("head_img", "")
-    }
-    return normalized
-
-
 # --- Pydantic Models ---
 class LoginRequest(BaseModel):
     account: str
@@ -381,21 +335,7 @@ def startup_event():
 @app.get("/healthz")
 def health_check():
     """Server health check endpoint required by NinePlus App."""
-    active_account = "17740696165"
-    if sys.platform == "win32":
-        token_file = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "ninebot", "tokens.json")
-    else:
-        token_file = os.path.join(os.path.expanduser("~"), ".config", "ninebot", "tokens.json")
-        
-    if os.path.exists(token_file):
-        try:
-            with open(token_file, "r", encoding="utf-8") as f:
-                token_data = json.load(f)
-                active_account = token_data.get("phone", active_account)
-        except Exception:
-            pass
-
-    return {"status": "ok", "service": "NinePlus Platform Server (Pure Token Mode)", "version": "2.5.0", "active_account": active_account}
+    return {"status": "ok", "service": "NinePlus Platform Server (Pure Token Mode)", "version": "2.5.0", "active_account": "17740696165"}
 
 
 @app.post("/admin/login")
@@ -406,79 +346,12 @@ def admin_login(req: AdminLoginRequest):
     raise HTTPException(status_code=401, detail="管理员用户名或密码错误")
 
 
-@app.delete("/admin/token")
-def admin_delete_token(req: AdminLoginRequest):
-    """Securely delete the Ninebot token file (Admin only)."""
-    if req.username == admin_store.admin_user and req.password == admin_store.admin_pass:
-        if sys.platform == "win32":
-            token_file = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "ninebot", "tokens.json")
-        else:
-            token_file = os.path.join(os.path.expanduser("~"), ".config", "ninebot", "tokens.json")
-            
-        if os.path.exists(token_file):
-            os.remove(token_file)
-            return {"status": "ok", "message": "九号账号授权 (Token) 已安全清除"}
-        return {"status": "ok", "message": "服务端目前没有保存任何 Token"}
-    raise HTTPException(status_code=401, detail="管理员用户名或密码错误")
-
-
-@app.post("/admin/export-token")
-def admin_export_token(req: AdminLoginRequest):
-    """Securely export the current Ninebot token JSON string for Render Environment Variables."""
-    if req.username == admin_store.admin_user and req.password == admin_store.admin_pass:
-        if sys.platform == "win32":
-            token_file = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "ninebot", "tokens.json")
-        else:
-            token_file = os.path.join(os.path.expanduser("~"), ".config", "ninebot", "tokens.json")
-            
-        if os.path.exists(token_file):
-            try:
-                with open(token_file, "r", encoding="utf-8") as f:
-                    return {"status": "ok", "token_json_string": f.read()}
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"无法读取 Token 文件: {e}")
-        return {"status": "error", "message": "目前没有保存在本地的 Token，请先登录。"}
-    raise HTTPException(status_code=401, detail="管理员用户名或密码错误")
-
-
 @app.post("/accounts/login")
 def login(req: LoginRequest):
     """Account login endpoint using ninecli."""
     logger.info(f"Token update request for Ninebot account: {req.account}")
-    
-    token_data = None
-    if sys.platform == "win32":
-        token_file = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "ninebot", "tokens.json")
-    else:
-        token_file = os.path.join(os.path.expanduser("~"), ".config", "ninebot", "tokens.json")
-        
-    if os.path.exists(token_file):
-        try:
-            with open(token_file, "r", encoding="utf-8") as f:
-                token_data = json.load(f)
-        except Exception:
-            pass
-            
-    if not token_data and DEFAULT_TOKEN_JSON:
-        try:
-            token_data = json.loads(DEFAULT_TOKEN_JSON)
-        except Exception:
-            pass
-
-    try:
-        payload = run_ninecli_json(["login", "-u", req.account, "-p", req.password])
-        if os.path.exists(token_file):
-            with open(token_file, "r", encoding="utf-8") as f:
-                token_data = json.load(f)
-        user_info = normalize_user_details(token_data or payload, req.account)
-        return {"status": "ok", "account": req.account, "details": user_info, "user": user_info, "data": user_info}
-    except Exception as e:
-        logger.warning(f"ninecli login failed ({e}), checking fallback token_data...")
-        if token_data:
-            logger.info("Returning fallback normalized token_data to complete iOS app login UI state.")
-            user_info = normalize_user_details(token_data, req.account)
-            return {"status": "ok", "account": req.account, "details": user_info, "user": user_info, "data": user_info}
-        raise e
+    payload = run_ninecli_json(["login", "-u", req.account, "-p", req.password])
+    return {"status": "ok", "account": req.account, "details": payload}
 
 
 @app.get("/vehicles")
