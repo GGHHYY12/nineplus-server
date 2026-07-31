@@ -502,6 +502,30 @@ def normalize_vehicle_list(payload: Any) -> List[dict]:
     return vehicles
 
 
+def vehicle_identifier_candidates(vehicle: dict) -> List[str]:
+    raw = vehicle.get("raw") if isinstance(vehicle, dict) else {}
+    raw = raw if isinstance(raw, dict) else {}
+    values = [
+        vehicle.get("sn"),
+        vehicle.get("wnumber"),
+        vehicle.get("vin"),
+        raw.get("sn"),
+        raw.get("wnumber"),
+        raw.get("vin"),
+        raw.get("id"),
+    ]
+
+    candidates: List[str] = []
+    seen = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        candidates.append(text)
+    return candidates
+
+
 def load_cached_vehicles() -> List[dict]:
     if not os.path.exists(VEHICLE_CACHE_FILE):
         return []
@@ -537,6 +561,115 @@ def warm_vehicle_cache():
             logger.warning("Vehicle cache warmup finished without valid vehicles")
     except Exception as exc:
         logger.warning(f"Vehicle cache warmup skipped: {exc}")
+
+
+def error_indicates_unknown_vehicle(detail: Any) -> bool:
+    text = str(detail or "").lower()
+    markers = [
+        "unknown vehicle",
+        "no vehicle cache",
+        "refresh cache",
+        "vehicle not found",
+        "invalid vehicle",
+        "车辆不存在",
+        "未找到车辆",
+    ]
+    return any(marker in text for marker in markers)
+
+
+def resolve_vehicle_command_candidates(requested_vehicle_id: str, *, refresh_inventory: bool = False) -> List[str]:
+    requested = str(requested_vehicle_id or "").strip()
+    candidates: List[str] = []
+    seen = set()
+
+    def add(value: Any):
+        text = str(value or "").strip()
+        if not text or text in seen:
+            return
+        seen.add(text)
+        candidates.append(text)
+
+    add(requested)
+
+    inventory: List[dict] = []
+    cached = load_cached_vehicles()
+    if cached:
+        inventory.extend(cached)
+
+    if refresh_inventory:
+        try:
+            payload = run_ninecli_json(["vehicles"], cold_start_retries=2, retry_delay_seconds=1.0)
+            fresh_inventory = normalize_vehicle_list(payload)
+            if fresh_inventory:
+                save_cached_vehicles(fresh_inventory)
+                inventory = fresh_inventory + inventory
+        except HTTPException as exc:
+            if exc.status_code == 401:
+                raise
+            logger.warning(f"Vehicle inventory refresh for candidate resolution failed: {exc.detail}")
+        except Exception as exc:
+            logger.warning(f"Vehicle inventory refresh for candidate resolution crashed: {exc}")
+
+    for vehicle in inventory:
+        aliases = vehicle_identifier_candidates(vehicle)
+        if requested and requested not in aliases:
+            continue
+        for alias in aliases:
+            add(alias)
+
+    if len(candidates) == 1 and inventory and len(inventory) == 1:
+        for alias in vehicle_identifier_candidates(inventory[0]):
+            add(alias)
+
+    return candidates
+
+
+def run_vehicle_scoped_command_json(
+    command: str,
+    vehicle_id: str,
+    *,
+    suffix_args: Optional[List[str]] = None,
+    expect_payload: bool = False,
+    cold_start_retries: int = 0,
+    retry_delay_seconds: float = 1.0,
+) -> Any:
+    suffix_args = suffix_args or []
+
+    def attempt(candidate_ids: List[str]) -> Any:
+        last_unknown_vehicle_exc: Optional[HTTPException] = None
+        for candidate in candidate_ids:
+            try:
+                return run_ninecli_json(
+                    [command, candidate, *suffix_args],
+                    expect_payload=expect_payload,
+                    cold_start_retries=cold_start_retries,
+                    retry_delay_seconds=retry_delay_seconds,
+                )
+            except HTTPException as exc:
+                if exc.status_code == 401:
+                    raise
+                if error_indicates_unknown_vehicle(exc.detail):
+                    logger.warning(
+                        f"{command} failed for vehicle identifier {candidate}; "
+                        f"will retry with refreshed inventory if possible: {exc.detail}"
+                    )
+                    last_unknown_vehicle_exc = exc
+                    continue
+                raise
+
+        if last_unknown_vehicle_exc:
+            raise last_unknown_vehicle_exc
+        raise HTTPException(status_code=400, detail=f"九号服务请求失败: {command} 缺少有效车辆标识")
+
+    try:
+        return attempt(resolve_vehicle_command_candidates(vehicle_id, refresh_inventory=False))
+    except HTTPException as exc:
+        if exc.status_code == 401 or not error_indicates_unknown_vehicle(exc.detail):
+            raise
+
+    refreshed_candidates = resolve_vehicle_command_candidates(vehicle_id, refresh_inventory=True)
+    logger.info(f"Retrying {command} after vehicle inventory refresh with candidates: {refreshed_candidates}")
+    return attempt(refreshed_candidates)
 
 
 def normalize_vehicle(v: dict) -> dict:
@@ -952,24 +1085,43 @@ def get_vehicles():
 @app.get("/vehicles/{sn}/status")
 def get_vehicle_status(sn: str):
     """Get vehicle current status."""
-    return run_ninecli_json(["status", sn], expect_payload=True, cold_start_retries=4, retry_delay_seconds=1.0)
+    return run_vehicle_scoped_command_json(
+        "status",
+        sn,
+        expect_payload=True,
+        cold_start_retries=4,
+        retry_delay_seconds=1.0,
+    )
 
 
 @app.get("/vehicles/{sn}/battery")
 def get_vehicle_battery(sn: str):
     """Get vehicle battery details."""
-    return run_ninecli_json(["battery", sn], expect_payload=True, cold_start_retries=4, retry_delay_seconds=1.0)
+    return run_vehicle_scoped_command_json(
+        "battery",
+        sn,
+        expect_payload=True,
+        cold_start_retries=4,
+        retry_delay_seconds=1.0,
+    )
 
 
 @app.get("/vehicles/{sn}/travel")
 def get_vehicle_travel(sn: str, month: Optional[str] = None):
     """Get vehicle travel & ride history requested by NinePlus App."""
     logger.info(f"Fetching travel data for SN: {sn}, month: {month}")
-    cmd = ["travel", sn]
+    suffix_args: List[str] = []
     if month:
         ninecli_month = month.replace("-", "")
-        cmd.extend(["--month", ninecli_month])
-    travel_data = run_ninecli_json(cmd, expect_payload=True, cold_start_retries=4, retry_delay_seconds=1.0)
+        suffix_args.extend(["--month", ninecli_month])
+    travel_data = run_vehicle_scoped_command_json(
+        "travel",
+        sn,
+        suffix_args=suffix_args,
+        expect_payload=True,
+        cold_start_retries=4,
+        retry_delay_seconds=1.0,
+    )
     
     total_mileage = 0.0
     records = []
@@ -1013,11 +1165,18 @@ def get_vehicle_travel(sn: str, month: Optional[str] = None):
 def sync_vehicle_travel(sn: str, month: Optional[str] = None, page_size: Optional[int] = 20):
     """Sync vehicle travel page for iOS App."""
     logger.info(f"Syncing travel page for SN: {sn}, month: {month}")
-    cmd = ["travel", sn]
+    suffix_args: List[str] = []
     if month:
         ninecli_month = month.replace("-", "")
-        cmd.extend(["--month", ninecli_month])
-    cli_result = run_ninecli_json(cmd, expect_payload=True, cold_start_retries=4, retry_delay_seconds=1.0)
+        suffix_args.extend(["--month", ninecli_month])
+    cli_result = run_vehicle_scoped_command_json(
+        "travel",
+        sn,
+        suffix_args=suffix_args,
+        expect_payload=True,
+        cold_start_retries=4,
+        retry_delay_seconds=1.0,
+    )
     
     records = []
     total_mileage = 0.0
@@ -1066,12 +1225,19 @@ def get_vehicle_travel_detail(sn: str, travel_id: str, month: Optional[str] = No
     Parses Ninebot's raw travel list and matches travel_id to return normalized record.
     """
     logger.info(f"Fetching travel detail for SN: {sn}, travel_id: {travel_id}")
-    cmd = ["travel", sn]
+    suffix_args: List[str] = []
     if month:
         ninecli_month = month.replace("-", "")
-        cmd.extend(["--month", ninecli_month])
+        suffix_args.extend(["--month", ninecli_month])
         
-    cli_result = run_ninecli_json(cmd, expect_payload=True, cold_start_retries=4, retry_delay_seconds=1.0)
+    cli_result = run_vehicle_scoped_command_json(
+        "travel",
+        sn,
+        suffix_args=suffix_args,
+        expect_payload=True,
+        cold_start_retries=4,
+        retry_delay_seconds=1.0,
+    )
     
     records = []
     matched_record = None
@@ -1120,9 +1286,27 @@ def get_vehicle_dashboard(sn: str):
     Combined Dashboard API requested by NinePlus iOS App.
     Returns status, battery, travel, prediction, totalMileage and latest_ride in a single payload.
     """
-    status = run_ninecli_json(["status", sn], expect_payload=True, cold_start_retries=4, retry_delay_seconds=1.0)
-    travel_data = run_ninecli_json(["travel", sn], expect_payload=True, cold_start_retries=4, retry_delay_seconds=1.0)
-    battery_data = run_ninecli_json(["battery", sn], expect_payload=True, cold_start_retries=4, retry_delay_seconds=1.0)
+    status = run_vehicle_scoped_command_json(
+        "status",
+        sn,
+        expect_payload=True,
+        cold_start_retries=4,
+        retry_delay_seconds=1.0,
+    )
+    travel_data = run_vehicle_scoped_command_json(
+        "travel",
+        sn,
+        expect_payload=True,
+        cold_start_retries=4,
+        retry_delay_seconds=1.0,
+    )
+    battery_data = run_vehicle_scoped_command_json(
+        "battery",
+        sn,
+        expect_payload=True,
+        cold_start_retries=4,
+        retry_delay_seconds=1.0,
+    )
     
     battery_percent = 0
     estimated_range = 0.0
@@ -1238,28 +1422,28 @@ def get_vehicle_dashboard(sn: str):
 def ring_bell(sn: str):
     """Remote bell / find vehicle."""
     logger.info(f"Remote bell triggered for SN: {sn}")
-    return run_ninecli_json(["bell", sn])
+    return run_vehicle_scoped_command_json("bell", sn)
 
 
 @app.post("/vehicles/{sn}/buck")
 def open_bucket(sn: str):
     """Remote open trunk / seat bucket."""
     logger.info(f"Remote open trunk triggered for SN: {sn}")
-    return run_ninecli_json(["buck", sn, "--yes"])
+    return run_vehicle_scoped_command_json("buck", sn, suffix_args=["--yes"])
 
 
 @app.post("/vehicles/{sn}/engine/start")
 def engine_start(sn: str):
     """Remote engine start / unlock."""
     logger.info(f"Remote engine start triggered for SN: {sn}")
-    return run_ninecli_json(["engine-start", sn, "--yes"])
+    return run_vehicle_scoped_command_json("engine-start", sn, suffix_args=["--yes"])
 
 
 @app.post("/vehicles/{sn}/engine/stop")
 def engine_stop(sn: str):
     """Remote engine stop / lock."""
     logger.info(f"Remote engine stop triggered for SN: {sn}")
-    return run_ninecli_json(["engine-stop", sn, "--yes"])
+    return run_vehicle_scoped_command_json("engine-stop", sn, suffix_args=["--yes"])
 
 
 @app.post("/vehicles/{sn}/prediction-settings")
